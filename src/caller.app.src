@@ -1,0 +1,15 @@
+{application, caller,
+ [
+  {description, "Caller"},
+  {vsn, "1.0"},
+  {id, "caller"},
+  {modules,      [tcp_listener, auth_server, tcp_fp, mytest, fpb, bert]},
+  {registered,   [tcp_server_sup, tcp_listener]},
+  {applications, [kernel, stdlib]},
+  %%
+  %% mod: Specify the module name to start the application, plus args
+  %%
+  {mod, {caller_app, []}},
+  {env, [
+ ]} %%env
+]}. %%application
