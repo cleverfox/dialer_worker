@@ -91,13 +91,15 @@ init([Port, Module]) ->
        },
 
        {   ami_server,                             % Id       = internal id
-	   {ami_server,start_link,
-               ["195.3.254.165",6038,"viruzzz","takida"]
-                                     },             % StartFun = {M, F, A}
-	   permanent,                               % Restart  = permanent | transient | temporary
-	   2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
-	   worker,                                  % Type     = worker | supervisor
-	   [ami_server]                            % Modules  = [Module] | dynamic
+           {ami_server,start_link,
+               %["195.3.254.165",6038,"viruzzz","takida"]
+               ["127.0.0.1",80,"viruzzz","takida"]
+               %[]
+           },             % StartFun = {M, F, A}
+           permanent,                               % Restart  = permanent | transient | temporary
+           2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
+           worker,                                  % Type     = worker | supervisor
+           [ami_server]                            % Modules  = [Module] | dynamic
        },
 
 

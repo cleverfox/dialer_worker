@@ -10,30 +10,19 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1]).
+-export([start_link/4]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-	 terminate/2, code_change/3]).
-
--export([authenticate/1,ping/1]).
--export([squery/1]).
--export([splitandtrim/4,splitandtrim/1,strunc/1]).
+-export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(SERVER, ?MODULE). 
 
--record(state, {socket,username,secret,state,buffer,job}).
--record(job, {chan,from,ext,state,uniqid,res,reason}).
+-record(state, {socket,host,port,username,secret,state,buffer,job}).
+-record(job, {chan,uniqid,uid,from,ext,state,res,reason,hup,huptxt}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
-
-authenticate({Method, Username, Domain, Challenge, Hash}) -> 
-    gen_server:call(?MODULE, {auth, Method, Username, Domain, Challenge, Hash}).
-
-ping(Data) -> 
-    gen_server:call(?MODULE, {myping, Data}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -42,8 +31,9 @@ ping(Data) ->
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Params) ->
-        gen_server:start_link({local, ?SERVER}, ?MODULE, Params, []).
+start_link(Host,Port,Username,Secret) ->
+    gen_server:start_link({local, ?SERVER}, ?MODULE,
+        [Host,Port,Username,Secret], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -62,20 +52,20 @@ start_link(Params) ->
 %%--------------------------------------------------------------------
 init([Host, Port, Username, Secret]) ->
     case gen_tcp:connect(Host, Port, [list, inet, {active, once}, 
-                        {exit_on_close, true}, {nodelay, true},
-                        {packet, line}, {recbuf, 524288}]) of 
-                        {ok, Sock} -> 
-                                {ok, #state{
-                                        socket=Sock,
-                                        username=Username,
-                                        secret=Secret,
-                                        state=connect,
-                                        buffer=undefined,
-                                        job=[]
-                                    }};
-                        Any ->
-                            Any
-                end.
+                {exit_on_close, true}, {nodelay, true},
+                {packet, line}, {recbuf, 524288}]) of 
+        {ok, Sock} -> 
+           {ok, #state{
+                    socket=Sock,
+                    username=Username,
+                    secret=Secret,
+                    state=connect,
+                    buffer=undefined,
+                    job=[]
+                }};
+        Any ->
+            Any
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -91,22 +81,24 @@ init([Host, Port, Username, Secret]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({originate,Chan,Ext}, From, #state{ job = Job } = State) ->
-        io:format("Originate ~p ~p, F ~p, S
-            ~p~n",[Chan,Ext,From,State]),
-            sendData(State,[
-                   {"Action","Originate"},
-                   {"Channel","SIP/g101/"++Chan++Ext},
-                   {"Context", "advert"},
-                   {"Exten","1"},
-                   {"Priority","1"},
-                   {"Callerid","123000"},
-                   {"ActionID",Chan},
-                   {"Account",Chan},
-                   {"Async","1"}
-               ]),
-           Job1=lists:append(Job,[#job{chan=Chan,from=From,ext=Ext,state=init}]),
-            {noreply, State#state{job=Job1},60000};
+handle_call({originate,UID,Chan,Ext}, From, #state{ job = Job } = State) ->
+    io:format("Originate ~p ~p, F ~p, S
+        ~p~n",[Chan,Ext,From,State]),
+        sendData(State,[
+                {"Action","Originate"},
+                %{"Channel","SIP/g101/"++Chan++Ext},
+                {"Channel","IAX2/xhome/"++Ext},
+                {"Context", "advert"},
+                {"Exten","1"},
+                {"Priority","1"},
+                {"Callerid","123000"},
+                {"Timeout","10000"},
+                {"ActionID",Chan},
+                {"Account",Chan},
+                {"Async","1"}
+            ]),
+        Job1=lists:append(Job,[#job{uid=UID,chan=Chan,from=From,ext=Ext,state=init}]),
+        {noreply, State#state{job=Job1},60000};
 
 handle_call(_Request, _From, State) ->
     Reply = unknown_request,
@@ -123,7 +115,7 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast(_Msg, State) ->
-    {noreply, State}.
+        {noreply, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -142,21 +134,21 @@ handle_info({tcp, Socket, Data},
         state=CS,
         buffer=Buf
     } = State) ->
-     inet:setopts(Socket, [{active, once}]),
+    inet:setopts(Socket, [{active, once}]),
     case CS of
         connect -> 
             io:format("Connected with ~p~n",[Data]),
             sendData(State,[
-                   {"Action","Login"},
-                   {"Username",Username},
-                   {"Secret", Secret}
-               ]),
+                    {"Action","Login"},
+                    {"Username",Username},
+                    {"Secret", Secret}
+                ]),
             {noreply, State#state{state=auth}};
         _ -> 
             %io:format("Recvd ~p~n",[Data]),
             NS=case Data of 
                 "\r\n" -> 
-                    S2=flush(State,Buf),
+                    S2=handle_data(State,Buf),
                     %io:format("State update ~p~n",[S2]),
                     S2#state{buffer=undefined};
                 Any ->
@@ -164,8 +156,8 @@ handle_info({tcp, Socket, Data},
                     L=case Buf of 
                         [_|_] ->
                             lists:append(Buf,[{C1,C2}]);
-                         undefined ->
-                             [{C1,C2}]
+                        undefined ->
+                            [{C1,C2}]
                     end,
                     State#state{buffer=L}
             end,
@@ -238,11 +230,6 @@ splitandtrim([C|Input],C1,C2,W) ->
 splitandtrim(X) ->
     splitandtrim(X,"","",1).
 
-%trim_whitespace(Input) ->
-%    splitandtrim(Input,"","",1).
-    %lists:delete(13,lists:delete(10,Input)).
-
-%re:replace(Input, "(\r\n)*", "").
 join_req(List) ->
     lists:flatten([lists:map(fun({X,Y}) -> [X,": ",Y,"\r\n"] end,List)|"\r\n"]).
 
@@ -251,7 +238,10 @@ sendData(#state{socket=Sock}=_State,Array) ->
     Req=join_req(Array),
     ok = gen_tcp:send(Sock, Req).
 
-flush(State,[Action|Array]) ->
+make_reply(_Res,JSta) ->
+    gen_server:reply(JSta#job.from,{ok,JSta}).
+
+handle_data(State,[Action|Array]) ->
     %io:format("Recvd(~p)~n",[Array]),
     %case [Array] of 
     %    [{_,"Authentication accepted"}] ->
@@ -270,25 +260,54 @@ flush(State,[Action|Array]) ->
             M=case Action of
                 {"Response","Success"} ->
                     {"ActionID",ID}=lists:keyfind("ActionID",1,Array),
-                    JSta=lists:keyfind(ID,2,State#state.job),
+                    JSta=lists:keyfind(ID,#job.chan,State#state.job),
                     JSta#job{state=queue};
                 %{"Response","Fail"} ->
                 %    undefined;
                 {"Event","OriginateResponse"} ->
                     {"ActionID",ID}=lists:keyfind("ActionID",1,Array),
-                    JSta=lists:keyfind(ID,2,State#state.job),
-                    {"Response",Resp}=lists:keyfind("Response",1,Array),
-                    {"Reason",Reas}=lists:keyfind("Reason",1,Array),
-                    case Resp of
-                        "Failure" ->
-                            gen_server:reply(JSta#job.from,{ok,JSta#job{state=res,res=Resp,reason=Reas}})
-                    end,
-                    JSta#job{state=res,res=Resp,reason=Reas};
-                %{"Event","Hangup"} ->
-                %    undefined;
+                    JSta=lists:keyfind(ID,#job.chan,State#state.job),
+%                    io:format("List ~p~n Found ~p~n",[State#state.job,JSta]),
+                    case JSta of
+                        false ->
+                            undefined;
+                        _ ->
+                            {"Response",Resp}=lists:keyfind("Response",1,Array),
+                            {"Reason",Reas}=lists:keyfind("Reason",1,Array),
+                            case Resp of
+                                "Failure" ->
+                                    NSta=JSta#job{state=res,res=Resp,reason=Reas},
+                                    make_reply(none,NSta),
+                                    %gen_server:reply(JSta#job.from,{ok,JSta#job{state=res,res=Resp,reason=Reas}}),
+                                    %JSta#job{state=res,res=Resp,reason=Reas};
+                                    {finish, ID};
+                                "Success" ->
+                                    JSta#job{state=progress,res=Resp,reason=Reas}
+                            end
+                    end;
+                {"Event","Hangup"} ->
+                    {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
+                    JSta=lists:keyfind(UID,#job.uniqid,State#state.job),
+                    case JSta of
+                        undefined ->
+                            undefined;
+                        X ->
+                            case JSta#job.state of
+                                progress ->
+                                    {_,Hup}=lists:keyfind("Cause",1,Array), 
+                                    {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
+                                    NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt},
+                                    make_reply(none,NSta),
+                                    {finish, NSta#job.chan};
+                                _ ->
+                                    {_,Hup}=lists:keyfind("Cause",1,Array), 
+                                    {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
+                                    X#job{hup=Hup,huptxt=HupTxt}
+                            end
+                    end;
                 {"Event","NewAccountCode"} -> 
                     {"AccountCode",ID}=lists:keyfind("AccountCode",1,Array),
-                    JSta=lists:keyfind(ID,2,State#state.job),
+                    JSta=lists:keyfind(ID,#job.chan,State#state.job),
                     {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
                     JSta#job{state=queue,uniqid=UID};
                 _ -> 
@@ -298,36 +317,22 @@ flush(State,[Action|Array]) ->
             case M of 
                 undefined -> 
                     State;
+                {finish, JID} ->
+                    J=lists:delete(undef,lists:map(fun(X) -> 
+                                case X#job.chan == JID of 
+                                    true -> undef;
+                                    _ -> X
+                                end
+                        end, State#state.job)),
+                    State#state{job=J};
                 _ -> 
                     J=lists:map(fun(X) -> 
                                 case X#job.chan == M#job.chan of 
                                     true -> M;
                                     _ -> X
                                 end
-                            end, State#state.job),
+                        end, State#state.job),
                     State#state{job=J}
             end
     end.
 
-
-squery(Sql) ->
-    poolboy:transaction(auth_db_worker, fun(Worker) ->
-        gen_server:call(Worker, {squery, Sql})
-    end).
-
-getpwuser(Username, Domain) ->
-    {ok, _, Res} = squery(lists:flatten(["select uid from domains where name='", Domain , "';"])),
-    case Res of
-	[] ->
-	    {error, unknown_realm};
-	[{DID}] ->
-	    Query=lists:flatten(["select uid, password from users where username='", Username, "' and domain_id=", binary_to_list(DID), ";"]),
-%%	    io:format("Query: ~p~n",[Query]),
-	    {ok, _, User} = squery(Query),
-	    case User of 
-		[] ->
-		    {error, no_such_user};
-		[{Uid,Upw}] ->
-		    {ok, {Uid, Upw}}
-	    end
-    end.
