@@ -32,7 +32,7 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link(Host,Port,Username,Secret) ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE,
+    gen_server:start_link({local, ?SERVER}, ?MODULE, 
         [Host,Port,Username,Secret], []).
 
 %%%===================================================================
@@ -51,21 +51,33 @@ start_link(Host,Port,Username,Secret) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Host, Port, Username, Secret]) ->
-    case gen_tcp:connect(Host, Port, [list, inet, {active, once}, 
-                {exit_on_close, true}, {nodelay, true},
-                {packet, line}, {recbuf, 524288}]) of 
-        {ok, Sock} -> 
-           {ok, #state{
-                    socket=Sock,
+%    case gen_tcp:connect(Host, Port, [list, inet, {active, once}, 
+%                {exit_on_close, true}, {nodelay, true},
+%                {packet, line}, {recbuf, 524288}]) of 
+%        {ok, Sock} -> 
+%           {ok, #state{
+%                    socket=Sock,
+%                    username=Username,
+%                    secret=Secret,
+%                    state=connect,
+%                    buffer=undefined,
+%                    job=[]
+%                }};
+%        {error, _Error} ->
+        erlang:send_after(1000, self(), {connect, 1}),
+            {ok, #state{
+                    socket=false,
+                    host=Host,
+                    port=Port,
                     username=Username,
                     secret=Secret,
                     state=connect,
                     buffer=undefined,
                     job=[]
-                }};
-        Any ->
-            Any
-    end.
+                }}
+%        Any ->
+%            Any
+.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -82,23 +94,28 @@ init([Host, Port, Username, Secret]) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_call({originate,UID,Chan,Ext}, From, #state{ job = Job } = State) ->
-    io:format("Originate ~p ~p, F ~p, S
-        ~p~n",[Chan,Ext,From,State]),
-        sendData(State,[
-                {"Action","Originate"},
-                %{"Channel","SIP/g101/"++Chan++Ext},
-                {"Channel","IAX2/xhome/"++Ext},
-                {"Context", "advert"},
-                {"Exten","1"},
-                {"Priority","1"},
-                {"Callerid","123000"},
-                {"Timeout","10000"},
-                {"ActionID",Chan},
-                {"Account",Chan},
-                {"Async","1"}
-            ]),
-        Job1=lists:append(Job,[#job{uid=UID,chan=Chan,from=From,ext=Ext,state=init}]),
-        {noreply, State#state{job=Job1},60000};
+    io:format("Originate ~p ~p, F ~p, S ~p~n",[Chan,Ext,From,State]),
+    case State#state.socket of
+        false ->
+            {reply, {error, ami_not_connected}, State};
+        _ ->
+            sendData(State,[
+                    {"Action","Originate"},
+                    %{"Channel","SIP/g101/"++Chan++Ext},
+                    {"Channel","IAX2/xhome/"++Ext},
+                    {"Context", "advert"},
+                    {"Exten","1"},
+                    {"Priority","1"},
+                    {"Callerid","123000"},
+                    {"Timeout","10000"},
+                    {"ActionID",Chan},
+                    {"Account",Chan},
+                    {"Async","1"}
+                ]),
+            Job1=lists:append(Job,[#job{uid=UID,chan=Chan,from=From,ext=Ext,state=init}]),
+            erlang:send_after(5000, self(), {handletimeout, Chan}),
+            {noreply, State#state{job=Job1},1200000}
+    end;
 
 handle_call(_Request, _From, State) ->
     Reply = unknown_request,
@@ -127,17 +144,37 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({tcp, Socket, Data},
-    #state{
-        username=Username,
-        secret=Secret,
-        state=CS,
-        buffer=Buf
-    } = State) ->
+
+handle_info({tcp_error, _Socket, _}, State) ->
+      erlang:send_after(1000, self(), {connect, 1}),
+      gen_tcp:close(State#state.socket),
+      {noreply,State#state{buffer=undefined,state=connect,socket=false}};
+
+handle_info({tcp_closed, _Socket}, State) ->
+      erlang:send_after(1000, self(), {connect, 1}),
+      {noreply,State#state{buffer=undefined,state=connect,socket=false}};
+
+handle_info({tcp, Socket, Data}, #state{ state=CS, buffer=Buf } = State) ->
     inet:setopts(Socket, [{active, once}]),
     case CS of
         connect -> 
             io:format("Connected with ~p~n",[Data]),
+            Username=case State#state.username of
+                env ->
+                    {ok,Xval1}=application:get_env(ami_username),
+                    Xval1;
+                _ -> 
+                    State#state.username
+            end,
+            Secret=case State#state.secret of
+                env ->
+                    {ok,Xval2}=application:get_env(ami_secret),
+                    Xval2;
+                _ -> 
+                    State#state.secret
+            end,
+
+
             sendData(State,[
                     {"Action","Login"},
                     {"Username",Username},
@@ -164,6 +201,46 @@ handle_info({tcp, Socket, Data},
             %io:format("Buf ~p~n",[L]),
             {noreply, NS}
     end;
+
+handle_info({handletimeout, Chan},State) ->
+    JSta=lists:keyfind(Chan,#job.chan,State#state.job),
+    NSta=JSta#job{state=timeout},
+    make_reply(none,NSta),
+    J=lists:delete(undef,lists:map(fun(X) -> 
+                    case X#job.chan == Chan of 
+                        true -> undef;
+                        _ -> X
+                    end
+            end, State#state.job)),
+    {noreply, State#state{job=J}};
+
+handle_info({connect, Times},State) ->
+    Host=case State#state.host of
+        env ->
+            {ok,XHost}=application:get_env(ami_host),
+            XHost;
+        _ -> 
+            State#state.host
+    end,
+    Port=case State#state.port of
+        env ->
+            {ok,XPort}=application:get_env(ami_port),
+            XPort;
+        _ -> 
+            State#state.port
+    end,
+
+    case gen_tcp:connect(Host, Port, [list, inet, {active, once}, 
+                {exit_on_close, true}, {nodelay, true},
+                {packet, line}, {recbuf, 524288}]) of 
+        {ok, Sock} -> 
+            {noreply, State#state{socket=Sock}};
+        {error, _} ->
+           erlang:send_after(1000, self(), {connect, Times+1}),
+            {noreply, State}
+    end;
+
+
 
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -289,7 +366,7 @@ handle_data(State,[Action|Array]) ->
                     {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
                     JSta=lists:keyfind(UID,#job.uniqid,State#state.job),
                     case JSta of
-                        undefined ->
+                        false ->
                             undefined;
                         X ->
                             case JSta#job.state of

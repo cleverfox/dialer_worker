@@ -1,0 +1,19 @@
+{application, dialer,
+ [
+  {description, "Dialer"},
+  {vsn, "1.0"},
+  {id, "dialer"},
+  {modules,      [tcp_listener, auth_server, ami_server, tcp_fp, mytest, fpb, bert]},
+  {registered,   [tcp_server_sup, tcp_listener, ami_server]},
+  {applications, [kernel, stdlib]},
+  %%
+  %% mod: Specify the module name to start the application, plus args
+  %%
+  {mod, {dialer_app, []}},
+  {env, [
+    {ami_host, "192.168.252.1"},
+    {ami_port, 6038}, 
+    {ami_username, "viruzzz"},
+    {ami_secret, "takida"}
+ ]} %%env
+]}. %%application

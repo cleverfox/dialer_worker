@@ -6,7 +6,7 @@
 %%% @end
 %%% Created :  5 Aug 2012 by Vladimir Goncharov <viruzzz@lnb.local>
 %%%-------------------------------------------------------------------
--module(caller_app).
+-module(dialer_app).
 
 -behaviour(application).
 
@@ -17,7 +17,6 @@
 
 -define(MAX_RESTART,    5).
 -define(MAX_TIME,      60).
--define(DEF_PORT,    7977).
 
 %%%===================================================================
 %%% Application callbacks
@@ -44,7 +43,7 @@ start_client() ->
 %% @end
 %%--------------------------------------------------------------------
 start(_StartType, _StartArgs) ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, [?DEF_PORT, tcp_fp]).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 
 %%--------------------------------------------------------------------
@@ -67,34 +66,31 @@ stop(_State) ->
 %%----------------------------------------------------------------------
 %% Supervisor behaviour callbacks
 %%----------------------------------------------------------------------
-init([Port, Module]) ->
+init([]) ->
     {ok,
      {_SupFlags = {one_for_one, ?MAX_RESTART, ?MAX_TIME},
       [
 						% TCP Listener
-       {   tcp_server_sup,                          % Id       = internal id
-	   {tcp_listener,start_link,[Port,Module]}, % StartFun = {M, F, A}
-	   permanent,                               % Restart  = permanent | transient | temporary
-	   2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
-	   worker,                                  % Type     = worker | supervisor
-	   [tcp_listener]                           % Modules  = [Module] | dynamic
-       },
-
+%       {   tcp_server_sup,                          % Id       = internal id
+%	   {tcp_listener,start_link,[Port,Module]}, % StartFun = {M, F, A}
+%	   permanent,                               % Restart  = permanent | transient | temporary
+%	   2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
+%	   worker,                                  % Type     = worker | supervisor
+%         [tcp_listener]                           % Modules  = [Module] | dynamic
+%      },
 
 						% Client instance supervisor
-       {   tcp_client_sup,
-	   {supervisor,start_link,[{local, tcp_client_sup}, ?MODULE, [Module]]},
-	   permanent,                               % Restart  = permanent | transient | temporary
-	   infinity,                                % Shutdown = brutal_kill | int() >= 0 | infinity
-	   supervisor,                              % Type     = worker | supervisor
-	   []                                       % Modules  = [Module] | dynamic
-       },
+%       {   tcp_client_sup,
+%	   {supervisor,start_link,[{local, tcp_client_sup}, ?MODULE, [Module]]},
+%	   permanent,                               % Restart  = permanent | transient | temporary
+%	   infinity,                                % Shutdown = brutal_kill | int() >= 0 | infinity
+%	   supervisor,                              % Type     = worker | supervisor
+%	   []                                       % Modules  = [Module] | dynamic
+ %      },
 
        {   ami_server,                             % Id       = internal id
            {ami_server,start_link,
-               %["195.3.254.165",6038,"viruzzz","takida"]
-               ["127.0.0.1",80,"viruzzz","takida"]
-               %[]
+               [env,env,env,env]
            },             % StartFun = {M, F, A}
            permanent,                               % Restart  = permanent | transient | temporary
            2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
@@ -117,9 +113,9 @@ init([Port, Module]) ->
                   {worker_module,auth_db_worker},
                   {size,5},
                   {max_overflow,20},
-                  {hostname,"127.0.0.1"},
-                  {database,"cloudfs"},
-                  {username,"postgres"},
+                  {hostname,"192.168.2.15"},
+                  {database,"caller"},
+                  {username,"pgsql"},
                   {password,""}]
 			       ]},             % StartFun = {M, F, A}
 	   permanent,                               % Restart  = permanent | transient | temporary
