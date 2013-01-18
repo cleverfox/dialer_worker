@@ -52,7 +52,7 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    erlang:send_after(1000, self(), queue_run),
+    erlang:send_after(10000, self(), queue_run),
     {ok, #state{dict=dict:new()}}.
 
 %%--------------------------------------------------------------------
@@ -114,20 +114,29 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-try_run_job({Jid,Nid,Num},State) ->
-    case dict:find({job,Jid},State#state.dict) of
-        {ok, _Job} ->
-            {already_running,State};
-        error ->
-            case calljob:run(Jid,Nid,Num) of 
-                {ok, Pid} ->
-                    S1=State#state.dict,
-                    S2=dict:store({job,Jid},#job{pid=Pid,jid=Jid,nid=Nid,data=Num},S1),
-                    S3=dict:store({pid,Pid},Jid,S2),
-                    {ok,State#state{dict=S3}};
-                _ ->
-                    {cant_run,State}
-            end
+try_run_job(PArg,State) ->
+    case PArg of 
+        {A1,A2,A3} ->
+            Jid=list_to_integer(binary_to_list(A1)),
+            Nid=list_to_integer(binary_to_list(A2)),
+            Num=binary_to_list(A3),
+            case dict:find({job,Jid},State#state.dict) of
+                {ok, _Job} ->
+                    {already_running,State};
+                error ->
+                    Arg=[{ext,Num},{grp,"2"},{timeout,60000}],
+                    case calljob:run(Jid,Arg) of 
+                        {ok, Pid} ->
+                            S1=State#state.dict,
+                            S2=dict:store({job,Jid},#job{pid=Pid,jid=Jid,nid=Nid,data=Arg},S1),
+                            S3=dict:store({pid,Pid},Jid,S2),
+                            {ok,State#state{dict=S3}};
+                        _ ->
+                            {cant_run,State}
+                    end
+            end;
+        _ -> 
+            {error, badarg}
     end.
 
 
@@ -154,26 +163,44 @@ handle_info(queue_run, State) ->
             erlang:send_after(5000, self(), queue_run),
             {noreply, State};
         [_|_] ->
-            erlang:send_after(5000, self(), queue_run),
+            erlang:send_after(30000, self(), queue_run),
             {noreply, iter_jobs(Res,State)}
     end;
 
-handle_info({'EXIT',Pid,_}, State) ->
+handle_info({ch_sta,Pid,Info}, State) ->
     D1=State#state.dict,
     case dict:is_key({pid,Pid},D1) of
         true ->
             Jid=dict:fetch({pid,Pid},D1),
             Job=dict:fetch({job,Jid},D1),
 
-            log("Calljob process ~p dead (~p)~n",[Pid,Job]),
+            log("Calljob process ~p (~p) Stat ~p~n",[Pid,Job,Info]),
             D2=dict:erase({pid, Pid}, D1),
             D3=dict:erase({job, Jid}, D2),
 
             {noreply, State#state{dict=D3}};
         false ->
+            log("sta unknown process ~p ~n",[Pid]),
+            {noreply, State}
+    end;
+handle_info({'EXIT',Pid,_}, State) ->
+    D1=State#state.dict,
+    case dict:is_key({pid,Pid},D1) of
+        true ->
+            Jid=dict:fetch({pid,Pid},D1),
+            Job=dict:fetch({job,Jid},D1),
+            log("Calljob process ~p dead (~p)~n",[Pid,Job]),
+            D2=dict:erase({pid, Pid}, D1),
+            D3=dict:erase({job, Jid}, D2),
+            {noreply, State#state{dict=D3}};
+        false ->
             log("Dead unknown process ~p ~n",[Pid]),
             {noreply, State}
     end;
+
+handle_info({job_complete, Jid, Job}, State) ->
+    log("Job complete ~p ~n",[Job]),
+    {noreply, complete_job(Jid,Job,State)};
 
 handle_info(Info, State) ->
     log("Unknown signal ~p ~n",[Info]),
@@ -191,13 +218,54 @@ code_change(_OldVsn, State, _Extra) ->
 
 %% Private
 
+field1(Field,Arg,False) ->
+    case lists:keyfind(Field,1,Arg) of
+        {Field, Data} ->
+            Data;
+        _ -> 
+            False
+    end.
+
+complete_job(Jid,Data,State) ->
+    log("complete_job ~p ~n~p ~p~n",[Jid,Data,field1(nid,Data,not_found)]),
+    case dict:find({job,Jid},State#state.dict) of
+                {ok, Job} ->
+                    Myres=case {field1(status,Data,none),field1(res_txt,Data,none),field1(res_num,Data,none)} of
+                        {hup, "Success", "4"} ->
+                            "Success";
+                        {timeout, _, _ } ->
+                            "Timeout";
+                        {res, "Failure", "5" } ->
+                            "Busy";
+                        {res, "Failure", "3" } ->
+                            "NotAnswer";
+                        {res, "Failure", "8" } ->
+                            "Congestion";
+                        _ ->
+                            "Unknown"
+                    end,
+                    log("complete ~p ~p ~n",[Myres,Job]),
+                    equery(
+                        "insert into job_log(job_id,number_id,result,duration) values($1,$2,$3,$4*'1 sec'::interval)",
+                        [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end]
+                    ),
+                    State;
+                error ->
+                    State
+    end.
+
+equery(Sql, Args) ->
+    poolboy:transaction(auth_db_worker, fun(Worker) ->
+        gen_server:call(Worker, {equery, Sql, Args})
+    end).
+
 squery(Sql) ->
     poolboy:transaction(auth_db_worker, fun(Worker) ->
         gen_server:call(Worker, {squery, Sql})
     end).
 
 getpwuser(Username, Domain) ->
-    {ok, _, Res} = squery(lists:flatten(["select uid from domains where name='", Domain , "';"])),
+    {ok, _, Res} = equery("select uid from domains where name='$1';",[Domain]),
     case Res of
 	[] ->
 	    {error, unknown_realm};

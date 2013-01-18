@@ -17,8 +17,9 @@
 
 -define(SERVER, ?MODULE). 
 
--record(state, {socket,host,port,username,secret,state,buffer,job}).
--record(job, {jobid,uniqid,uid,from,ext,state,res,reason,echan,hup,huptxt,timeout}).
+-record(state, {socket,host,port,username,secret,state,buffer,job,cntr}).
+-record(job,
+    {jobid,uniqid,uid,from,ext,state,res,reason,echan,hup,huptxt,timeout,callnum,start}).
 
 %%%===================================================================
 %%% API
@@ -54,7 +55,7 @@ start_link(Host,Port,Username,Secret) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Host, Port, Username, Secret]) ->
-        erlang:send_after(1000, self(), {connect, 1}),
+        erlang:send_after(100, self(), {connect, 1}),
             {ok, #state{
                     socket=false,
                     host=Host,
@@ -63,7 +64,8 @@ init([Host, Port, Username, Secret]) ->
                     secret=Secret,
                     state=connect,
                     buffer=undefined,
-                    job=[]
+                    job=[],
+                    cntr=0
                 }}.
 
 %%--------------------------------------------------------------------
@@ -80,7 +82,8 @@ init([Host, Port, Username, Secret]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({originate,UID,Chan,Ext,Timeout}, From, #state{ job = Job } = State) ->
+handle_call({originate,UID,Chan,Ext,Timeout}, From, 
+    #state{ job = Job, cntr=Cnt} = State) ->
     log("Originate ~p ~p, F ~p, S ~p~n",[Chan,Ext,From,State]),
     case State#state.socket of
         false ->
@@ -88,20 +91,20 @@ handle_call({originate,UID,Chan,Ext,Timeout}, From, #state{ job = Job } = State)
         _ ->
             sendData(State,[
                     {"Action","Originate"},
-                    %{"Channel","SIP/g101/"++Chan++Ext},
+                    %{"Channel","SIP/g102/"++Chan++Ext},
                     {"Channel","IAX2/xhome/"++Ext},
                     {"Context", "advert"},
                     {"Exten","1"},
                     {"Priority","1"},
                     {"Callerid","123000"},
-                    {"Timeout","10000"},
+                    {"Timeout","20000"},
                     {"ActionID",Chan},
                     {"Account",Chan},
                     {"Async","1"}
                 ]),
-            Job1=lists:append(Job,[#job{uid=UID,jobid=Chan,from=From,ext=Ext,state=init}]),
-            erlang:send_after(Timeout, self(), {handletimeout, Chan}),
-            {noreply, State#state{job=Job1}, 1200000}
+            Job1=lists:append(Job,[#job{uid=UID,jobid=Chan,from=From,ext=Ext,state=init,callnum=Cnt}]),
+            erlang:send_after(Timeout, self(), {handletimeout, Cnt}),
+            {noreply, State#state{job=Job1,cntr=Cnt+1}, 1200000}
     end;
 
 handle_call(_Request, _From, State) ->
@@ -190,13 +193,15 @@ handle_info({tcp, Socket, Data}, #state{ state=CS, buffer=Buf } = State) ->
             {noreply, NS}
     end;
 
-handle_info({handletimeout, Chan},State) ->
-    JSta=lists:keyfind(Chan,#job.jobid,State#state.job),
+handle_info({handletimeout, CallId},State) ->
+    JSta=lists:keyfind(CallId,#job.callnum,State#state.job),
     case JSta of
         false ->
+            log("Timeout on dead call ~p~n",[CallId]),
             {noreply, State};
        _  ->
             NSta=JSta#job{state=timeout},
+            log("Timeout on call ~p ~p~n",[CallId,JSta]),
             make_reply(none,NSta),
             sendData(State,[
                     {"Action","Hangup"},
@@ -204,7 +209,7 @@ handle_info({handletimeout, Chan},State) ->
                 ]),
 
             J=lists:delete(undef,lists:map(fun(X) -> 
-                            case X#job.jobid == Chan of 
+                            case X#job.callnum == CallId of 
                                 true -> undef;
                                 _ -> X
                             end
@@ -314,8 +319,16 @@ sendData(#state{socket=Sock}=_State,Array) ->
     Req=join_req(Array),
     ok = gen_tcp:send(Sock, Req).
 
-make_reply(_Res,JSta) ->
-    gen_server:reply(JSta#job.from,{ok,JSta}).
+make_reply(Res,JSta) ->
+    Reply=case Res of 
+        none ->
+            {JSta#job.uid,JSta#job.jobid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
+                undef};
+        duration ->
+            {JSta#job.uid,JSta#job.jobid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
+                calendar:datetime_to_gregorian_seconds({date(),time()})-JSta#job.start}
+    end,    
+    gen_server:reply(JSta#job.from,{ok,Reply}).
 
 handle_data(State,[Action|Array]) ->
     %io:format("Recvd(~p)~n",[Array]),
@@ -323,7 +336,8 @@ handle_data(State,[Action|Array]) ->
     %    [{_,"Authentication accepted"}] ->
     %        io:format("AMI ready~n");
     %     _ -> 
-    log("Received state ~p message ~p ~n    ~p~n",[State#state.state,Action,Array]),
+    log("Received state ~p message ~p ~n",[State#state.state,Action]),
+    log("Data  ~p ~n",[Array]),
     case State#state.state of
         auth ->
             case Action of
@@ -358,11 +372,11 @@ handle_data(State,[Action|Array]) ->
                                 "Failure" ->
                                     NSta=JSta#job{state=res,res=Resp,reason=Reas},
                                     make_reply(none,NSta),
-                                    %gen_server:reply(JSta#job.from,{ok,JSta#job{state=res,res=Resp,reason=Reas}}),
+                                    %gen_server:reply(JSta#job.from,{ok,JSta#job{state=fail,res=Resp,reason=Reas}}),
                                     %JSta#job{state=res,res=Resp,reason=Reas};
                                     {finish, ID};
                                 "Success" ->
-                                    JSta#job{state=progress,res=Resp,reason=Reas}
+                                    JSta#job{state=progress,res=Resp,reason=Reas,start=calendar:datetime_to_gregorian_seconds({date(),time()})}
                             end
                     end;
                 {"Event","Hangup"} ->
@@ -377,7 +391,7 @@ handle_data(State,[Action|Array]) ->
                                     {_,Hup}=lists:keyfind("Cause",1,Array), 
                                     {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
                                     NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt},
-                                    make_reply(none,NSta),
+                                    make_reply(duration,NSta),
                                     {finish, NSta#job.jobid};
                                 _ ->
                                     {_,Hup}=lists:keyfind("Cause",1,Array), 

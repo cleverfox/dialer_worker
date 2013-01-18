@@ -1,5 +1,6 @@
 *.beam
 *.trace
+*swp
 *~
 deps/*
 ebin/*.beam

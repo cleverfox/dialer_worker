@@ -11,7 +11,7 @@
 -behaviour(application).
 
 %% Application callbacks
--export([start/2, stop/1, init/1]).
+-export([start/0, start/2, stop/1, init/1]).
 -export([start_client/0]).
 -export([get_app_env/2]).
 
@@ -42,7 +42,10 @@ start_client() ->
 %%      StartArgs = term()
 %% @end
 %%--------------------------------------------------------------------
-start(_StartType, _StartArgs) ->
+start() ->
+    application:start(dialer).
+
+start(_StartType, _StartArgs) -> 
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 
@@ -88,7 +91,16 @@ init([]) ->
 %	   []                                       % Modules  = [Module] | dynamic
  %      },
 
-       {   ami_server,                             % Id       = internal id
+       {   mqueue,                             % Id       = internal id
+           {mqueue,start_link, [] },             % StartFun = {M, F, A}
+           permanent,                               % Restart  = permanent | transient | temporary
+           2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
+           worker,                                  % Type     = worker | supervisor
+           [mqueue]                            % Modules  = [Module] | dynamic
+       },
+
+
+      {   ami_server,                             % Id       = internal id
            {ami_server,start_link,
                [env,env,env,env]
            },             % StartFun = {M, F, A}
