@@ -74,6 +74,14 @@ init([]) ->
      {_SupFlags = {one_for_one, ?MAX_RESTART, ?MAX_TIME},
       [
 						% TCP Listener
+%       {   lager,                          % Id       = internal id
+%	   {lager,start,[]}, % StartFun = {M, F, A}
+%	   permanent,                               % Restart  = permanent | transient | temporary
+%	   2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
+%	   worker,                                  % Type     = worker | supervisor
+%         [lager]                           % Modules  = [Module] | dynamic
+%      },
+
 %       {   tcp_server_sup,                          % Id       = internal id
 %	   {tcp_listener,start_link,[Port,Module]}, % StartFun = {M, F, A}
 %	   permanent,                               % Restart  = permanent | transient | temporary
@@ -125,11 +133,13 @@ init([]) ->
                   {worker_module,auth_db_worker},
                   {size,5},
                   {max_overflow,20},
-                  {hostname,"192.168.2.15"},
-                  {database,"caller"},
-                  {username,"pgsql"},
-                  {password,""}]
-			       ]},             % StartFun = {M, F, A}
+                  %{hostname,"192.168.2.15"},
+                  %{database,"caller"},
+                  %{username,"pgsql"},
+                  %{password,""}
+                  {pad,pad}
+              ]
+          ]},             % StartFun = {M, F, A}
 	   permanent,                               % Restart  = permanent | transient | temporary
 	   5000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
 	   worker,                                  % Type     = worker | supervisor

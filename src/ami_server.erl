@@ -9,6 +9,7 @@
 -module(ami_server).
 -behaviour(gen_server).
 
+-compile([{parse_transform, lager_transform}]).
 %% API
 -export([start_link/4,originate/4]).
 
@@ -84,24 +85,40 @@ init([Host, Port, Username, Secret]) ->
 %%--------------------------------------------------------------------
 handle_call({originate,UID,Chan,Ext,Timeout}, From, 
     #state{ job = Job, cntr=Cnt} = State) ->
-    log("Originate ~p ~p, F ~p, S ~p~n",[Chan,Ext,From,State]),
+    lager:info("Originate ~p ~p, F ~p, S ~p~n",[Chan,Ext,From,State]),
     case State#state.socket of
         false ->
             {reply, {error, ami_not_connected}, State};
         _ ->
-            sendData(State,[
-                    {"Action","Originate"},
-                    %{"Channel","SIP/g102/"++Chan++Ext},
-                    {"Channel","IAX2/xhome/"++Ext},
-                    {"Context", "advert"},
-                    {"Exten","1"},
-                    {"Priority","1"},
-                    {"Callerid","123000"},
-                    {"Timeout","20000"},
-                    {"ActionID",Chan},
-                    {"Account",Chan},
-                    {"Async","1"}
-                ]),
+            Channel=case application:get_env(ami_call_channel) of
+                {ok, Xval1} ->
+                    io_lib:format(Xval1,[Chan,Ext])
+            end,
+            Tpl=case application:get_env(ami_template) of
+                {ok, Xval2} ->
+                    Xval2
+            end,
+            Ar1=[
+                {"Channel",Channel},
+                {"ActionID",Chan},
+                {"Account",Chan}
+            ],
+            Request=[Ar1 | Tpl],
+
+            sendData(State,Request),
+            %sendData(State,[
+            %        {"Action","Originate"},
+            %        %{"Channel","SIP/g102/"++Chan++Ext},
+            %        {"Channel","IAX2/xhome/"++Ext},
+            %        {"Context", "advert"},
+            %        {"Exten","1"},
+            %        {"Priority","1"},
+            %        {"Callerid","123000"},
+            %        {"Timeout","20000"},
+            %        {"ActionID",Chan},
+            %        {"Account",Chan},
+            %        {"Async","1"}
+            %    ]),
             Job1=lists:append(Job,[#job{uid=UID,jobid=Chan,from=From,ext=Ext,state=init,callnum=Cnt}]),
             erlang:send_after(Timeout, self(), {handletimeout, Cnt}),
             {noreply, State#state{job=Job1,cntr=Cnt+1}, 1200000}
@@ -148,7 +165,7 @@ handle_info({tcp, Socket, Data}, #state{ state=CS, buffer=Buf } = State) ->
     inet:setopts(Socket, [{active, once}]),
     case CS of
         connect -> 
-            log("Connected with ~p~n",[Data]),
+            lager:info("Connected with ~p~n",[Data]),
             Username=case State#state.username of
                 env ->
                     {ok,Xval1}=application:get_env(ami_username),
@@ -176,7 +193,7 @@ handle_info({tcp, Socket, Data}, #state{ state=CS, buffer=Buf } = State) ->
             NS=case Data of 
                 "\r\n" -> 
                     S2=handle_data(State,Buf),
-                    io:format("~p~n~n",[S2#state.job]),
+                    lager:info("~p~n~n",[S2#state.job]),
                     %io:format("State update ~p~n",[S2]),
                     S2#state{buffer=undefined};
                 Any ->
@@ -197,11 +214,11 @@ handle_info({handletimeout, CallId},State) ->
     JSta=lists:keyfind(CallId,#job.callnum,State#state.job),
     case JSta of
         false ->
-            log("Timeout on dead call ~p~n",[CallId]),
+            lager:info("Timeout on dead call ~p~n",[CallId]),
             {noreply, State};
        _  ->
             NSta=JSta#job{state=timeout},
-            log("Timeout on call ~p ~p~n",[CallId,JSta]),
+            lager:info("Timeout on call ~p ~p~n",[CallId,JSta]),
             make_reply(none,NSta),
             sendData(State,[
                     {"Action","Hangup"},
@@ -315,7 +332,7 @@ join_req(List) ->
     lists:flatten([lists:map(fun({X,Y}) -> [X,": ",Y,"\r\n"] end,List)|"\r\n"]).
 
 sendData(#state{socket=Sock}=_State,Array) ->
-    log("Send(~p)~n",[Array]),
+    lager:info("Send(~p)~n",[Array]),
     Req=join_req(Array),
     ok = gen_tcp:send(Sock, Req).
 
@@ -336,8 +353,8 @@ handle_data(State,[Action|Array]) ->
     %    [{_,"Authentication accepted"}] ->
     %        io:format("AMI ready~n");
     %     _ -> 
-    log("Received state ~p message ~p ~n",[State#state.state,Action]),
-    log("Data  ~p ~n",[Array]),
+    lager:info("Received state ~p message ~p ~n",[State#state.state,Action]),
+    lager:info("Data  ~p ~n",[Array]),
     case State#state.state of
         auth ->
             case Action of
@@ -406,7 +423,7 @@ handle_data(State,[Action|Array]) ->
                     {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
                     JSta#job{state=queue,uniqid=UID,echan=EC};
                 _ -> 
-                    log("Unknown message ~p (~p)~n",[Action,Array]),
+                    lager:info("Unknown message ~p (~p)~n",[Action,Array]),
                     undefined
             end,
             case M of 
@@ -430,7 +447,4 @@ handle_data(State,[Action|Array]) ->
                     State#state{job=J}
             end
     end.
-
-log (X,Y) ->
-    io:format(X,Y).
 

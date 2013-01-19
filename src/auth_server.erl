@@ -10,6 +10,7 @@
 
 -behaviour(gen_server).
 
+-compile([{parse_transform, lager_transform}]).
 %% API
 -export([start_link/0]).
 
@@ -82,14 +83,14 @@ handle_call({auth, chapsha1, Username, Domain, Challenge, Hash}, _From, State) -
 	    %%   io:format("Authenticating user ~p(~p) with pw ~p and challenge ~p~n",[Username,Uid,Pw,Challenge]),
 	    case crypto:sha_mac(Pw,Challenge)=:=Hash of
 		true -> 
-		    error_logger:info_msg("User ~p@~p: authentcation success~n",[Username,Domain]),
+		    lager:info("User ~p@~p: authentcation success~n",[Username,Domain]),
 		    {reply, allow, State};
 		false ->
-		    error_logger:warning_msg("User ~p@~p: password incorrect~n",[Username,Domain]),
+		    lager:error("User ~p@~p: password incorrect~n",[Username,Domain]),
 		    {reply, deny, State}
 	    end;
 	{error, Cause} ->
-	     error_logger:warning_msg("User ~p@~p: auth error ~p~n",[Username,Domain,Cause]),
+	     lager:info("User ~p@~p: auth error ~p~n",[Username,Domain,Cause]),
 	    {reply, deny, Cause}
     end;
 

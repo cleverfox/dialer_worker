@@ -1,5 +1,6 @@
 -module(calljob).
 
+-compile([{parse_transform, lager_transform}]).
 -export([run/2]).
 -export([work/3]).
 
@@ -9,7 +10,7 @@ run(Jid,Arg) ->
     {ok,spawn_link(?MODULE,work,[Jid,Arg,self()])}.
 
 work(Jid,Arg,Pid) ->
-%    io:format("Job xrun~p~n",[[Jid,Arg,Pid]]),
+    lager:info("Job xrun~p~n",[[Jid,Arg,Pid]]),
     {grp,Grp}=lists:keyfind(grp,1,Arg),
     {ext,Ext}=lists:keyfind(ext,1,Arg),
     Timeout=case lists:keyfind(timeout,1,Arg) of {timeout, To} -> To; _ -> 30000 end,

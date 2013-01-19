@@ -1,6 +1,7 @@
 -module(mqueue).
 -behaviour(gen_server).
 
+-compile([{parse_transform, lager_transform}]).
 %% API
 -export([start_link/0]).
 
@@ -52,6 +53,7 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
+    lager:info("~p started~n",[?MODULE]),
     erlang:send_after(10000, self(), queue_run),
     {ok, #state{dict=dict:new()}}.
 
@@ -75,14 +77,14 @@ handle_call({auth, chapsha1, Username, Domain, Challenge, Hash}, _From, State) -
 	    %%   io:format("Authenticating user ~p(~p) with pw ~p and challenge ~p~n",[Username,Uid,Pw,Challenge]),
 	    case crypto:sha_mac(Pw,Challenge)=:=Hash of
 		true -> 
-		    error_logger:info_msg("User ~p@~p: authentcation success~n",[Username,Domain]),
+		    lager:info("User ~p@~p: authentcation success~n",[Username,Domain]),
 		    {reply, allow, State};
 		false ->
-		    error_logger:warning_msg("User ~p@~p: password incorrect~n",[Username,Domain]),
+		    lager:info("User ~p@~p: password incorrect~n",[Username,Domain]),
 		    {reply, deny, State}
 	    end;
 	{error, Cause} ->
-	     error_logger:warning_msg("User ~p@~p: auth error ~p~n",[Username,Domain,Cause]),
+	     lager:error("User ~p@~p: auth error ~p~n",[Username,Domain,Cause]),
 	    {reply, deny, Cause}
     end;
 
@@ -145,26 +147,31 @@ iter_jobs([],State) ->
 
 iter_jobs([R|X],State) ->
     {Jid,Nid,Num}=R,
-    log("Call job ~p, number ~p: ~p~n",[Jid,Nid,Num]),
+    lager:info("Call job ~p, number ~p: ~p~n",[Jid,Nid,Num]),
     {_,St1}=try_run_job(R,State),
     iter_jobs(X,St1).
 
 handle_info(queue_run, State) ->
-    log("Queue run~n",[]),
+    lager:info("Queue run~n",[]),
     L=["SELECT j.id,jn.id,jn.number from job j inner join ",
         "job_numbers jn on jn.job_id=j.id where now()::time ",
         "between allowed_times and allowed_timee and (next_try ",
         "is null or next_try <now()) and (j.next_number_id is ",
         "null or j.next_number_id = jn.id)"],
-    {ok, _X, Res} = squery(lists:flatten(L)),
-    log("Call job ~p ~n",[Res]),
-    case Res of
-        [] ->
-            erlang:send_after(5000, self(), queue_run),
-            {noreply, State};
-        [_|_] ->
-            erlang:send_after(30000, self(), queue_run),
-            {noreply, iter_jobs(Res,State)}
+    case squery(lists:flatten(L)) of
+        {ok, _X, Res} ->
+            lager:info("Call job ~p ~n",[Res]),
+            case Res of
+                [] ->
+                    erlang:send_after(5000, self(), queue_run),
+                    {noreply, State};
+                [_|_] ->
+                    erlang:send_after(30000, self(), queue_run),
+                    {noreply, iter_jobs(Res,State)}
+            end;
+        {error, Er} ->
+            lager:error("Call job error: ~p",[Er]),
+            {noreply, State}
     end;
 
 handle_info({ch_sta,Pid,Info}, State) ->
@@ -174,13 +181,13 @@ handle_info({ch_sta,Pid,Info}, State) ->
             Jid=dict:fetch({pid,Pid},D1),
             Job=dict:fetch({job,Jid},D1),
 
-            log("Calljob process ~p (~p) Stat ~p~n",[Pid,Job,Info]),
+            lager:info("Calljob process ~p (~p) Stat ~p~n",[Pid,Job,Info]),
             D2=dict:erase({pid, Pid}, D1),
             D3=dict:erase({job, Jid}, D2),
 
             {noreply, State#state{dict=D3}};
         false ->
-            log("sta unknown process ~p ~n",[Pid]),
+            lager:info("sta unknown process ~p ~n",[Pid]),
             {noreply, State}
     end;
 handle_info({'EXIT',Pid,_}, State) ->
@@ -189,21 +196,21 @@ handle_info({'EXIT',Pid,_}, State) ->
         true ->
             Jid=dict:fetch({pid,Pid},D1),
             Job=dict:fetch({job,Jid},D1),
-            log("Calljob process ~p dead (~p)~n",[Pid,Job]),
+            lager:info("Calljob process ~p dead (~p)~n",[Pid,Job]),
             D2=dict:erase({pid, Pid}, D1),
             D3=dict:erase({job, Jid}, D2),
             {noreply, State#state{dict=D3}};
         false ->
-            log("Dead unknown process ~p ~n",[Pid]),
+            lager:info("Dead unknown process ~p ~n",[Pid]),
             {noreply, State}
     end;
 
 handle_info({job_complete, Jid, Job}, State) ->
-    log("Job complete ~p ~n",[Job]),
+    lager:info("Job complete ~p ~n",[Job]),
     {noreply, complete_job(Jid,Job,State)};
 
 handle_info(Info, State) ->
-    log("Unknown signal ~p ~n",[Info]),
+    lager:error("Unknown signal ~p ~n",[Info]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
@@ -227,7 +234,7 @@ field1(Field,Arg,False) ->
     end.
 
 complete_job(Jid,Data,State) ->
-    log("complete_job ~p ~n~p ~p~n",[Jid,Data,field1(nid,Data,not_found)]),
+    lager:info("complete_job ~p ~n~p ~p~n",[Jid,Data,field1(nid,Data,not_found)]),
     case dict:find({job,Jid},State#state.dict) of
                 {ok, Job} ->
                     Myres=case {field1(status,Data,none),field1(res_txt,Data,none),field1(res_num,Data,none)} of
@@ -244,7 +251,7 @@ complete_job(Jid,Data,State) ->
                         _ ->
                             "Unknown"
                     end,
-                    log("complete ~p ~p ~n",[Myres,Job]),
+                    lager:info("complete ~p ~p ~n",[Myres,Job]),
                     equery(
                         "insert into job_log(job_id,number_id,result,duration) values($1,$2,$3,$4*'1 sec'::interval)",
                         [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end]
@@ -281,5 +288,3 @@ getpwuser(Username, Domain) ->
 	    end
     end.
 
-log (X,Y) ->
-    io:format(X,Y).
