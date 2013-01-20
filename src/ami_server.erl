@@ -11,7 +11,7 @@
 
 -compile([{parse_transform, lager_transform}]).
 %% API
--export([start_link/4,originate/4]).
+-export([start_link/4,originate/5]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -19,15 +19,14 @@
 -define(SERVER, ?MODULE). 
 
 -record(state, {socket,host,port,username,secret,state,buffer,job,cntr}).
--record(job,
-    {jobid,uniqid,uid,from,ext,state,res,reason,echan,hup,huptxt,timeout,callnum,start}).
+-record(job, {jobid,uniqid,uid,from,ext,state,res,reason,echan,hup,huptxt,timeout,callnum,start}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-originate(UID,Chan,Ext,Timeout) -> 
-    gen_server:call(?MODULE, {originate,UID,Chan,Ext,Timeout}, 600000).
+originate(UID,Chan,Ext,Timeout,Args) -> 
+    gen_server:call(?MODULE, {originate,UID,Chan,Ext,Timeout,Args}, 600000).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -83,28 +82,80 @@ init([Host, Port, Username, Secret]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call({originate,UID,Chan,Ext,Timeout}, From, 
+rnd(Prob) ->
+    [Rnd|_]=binary_to_list(crypto:rand_bytes(1)),
+    Rnd/256 < Prob.
+        
+handle_call({originate,UID,Chan,Ext,Timeout,Args}, From, 
     #state{ job = Job, cntr=Cnt} = State) ->
     lager:info("Originate ~p ~p, F ~p, S ~p~n",[Chan,Ext,From,State]),
+    Channel=case application:get_env(ami_call_channel) of
+        {ok, Xval1} ->
+            io_lib:format(Xval1,[Chan,Ext])
+    end,
+    Tpl=case application:get_env(ami_template) of
+        {ok, Xval2} ->
+            Xval2
+    end,
+    %Ar1=[
+    %    {"Channel",Channel},
+    %    {"ActionID",Chan},
+    %    {"Account",Chan}
+    %],
+    %Request=[Ar1 | Tpl],
+    Fx=fun({A,B})-> 
+            R=case is_atom(B) of 
+                true ->
+                    case B of
+                        channel -> Channel; 
+                        chan -> Chan; 
+                        _ -> 
+                            case lists:keyfind(B,1,Args) of
+                                {B, Val} -> Val;
+                                _ -> 
+                                    lager:error("Value for atom ~p in call template is undefined",[B]),
+                                    atom_to_list(B)
+                            end
+                    end;
+                false -> B 
+            end, 
+            {A,R} 
+    end,
+    Request=lists:map(Fx,Tpl),
     case State#state.socket of
         false ->
             {reply, {error, ami_not_connected}, State};
+        emulator ->
+            lager:info("Emulator request: ~p",[Request]),
+            {Prob_Ans,Prob_Busy,Prob_NA}=case application:get_env(ami_emulator) of
+                {ok, {Pa,Pb,Pn}} -> 
+                    {Pa, Pb, Pn};
+                _ ->
+                    {0.5, 0.5, 0.5}
+            end,
+            Reply=case rnd(Prob_Ans) of
+                true ->
+                    timer:sleep(5000),
+                    {ok,{UID,Chan,Ext,hup,"Success","4",5}};
+                false ->
+                    case rnd(Prob_Busy) of
+                        true ->
+                            timer:sleep(2000),
+                            {ok,{UID,Chan,Ext,res,"Failure","5",0}};
+                        false ->
+                            case rnd(Prob_NA) of
+                                true ->
+                                    timer:sleep(7000),
+                                    {ok,{UID,Chan,Ext,res,"Failure","3",0}};
+                                false ->
+                                    timer:sleep(1000),
+                                    {ok,{UID,Chan,Ext,res,"Failure","8",0}}
+                            end
+                    end
+            end,
+            lager:info("Emulator res: ~p",[Reply]),
+            {reply, Reply, State};
         _ ->
-            Channel=case application:get_env(ami_call_channel) of
-                {ok, Xval1} ->
-                    io_lib:format(Xval1,[Chan,Ext])
-            end,
-            Tpl=case application:get_env(ami_template) of
-                {ok, Xval2} ->
-                    Xval2
-            end,
-            Ar1=[
-                {"Channel",Channel},
-                {"ActionID",Chan},
-                {"Account",Chan}
-            ],
-            Request=[Ar1 | Tpl],
-
             sendData(State,Request),
             %sendData(State,[
             %        {"Action","Originate"},
@@ -251,14 +302,19 @@ handle_info({connect, Times},State) ->
             State#state.port
     end,
 
-    case gen_tcp:connect(Host, Port, [list, inet, {active, once}, 
-                {exit_on_close, true}, {nodelay, true},
-                {packet, line}, {recbuf, 524288}]) of 
-        {ok, Sock} -> 
-            {noreply, State#state{socket=Sock}};
-        {error, _} ->
-           erlang:send_after(1000, self(), {connect, Times+1}),
-            {noreply, State}
+    case Host of 
+        emulator -> 
+            {noreply, State#state{socket=emulator}};
+        _ ->
+            case gen_tcp:connect(Host, Port, [list, inet, {active, once}, 
+                        {exit_on_close, true}, {nodelay, true},
+                        {packet, line}, {recbuf, 524288}]) of 
+                {ok, Sock} -> 
+                    {noreply, State#state{socket=Sock}};
+                {error, _} ->
+                    erlang:send_after(1000, self(), {connect, Times+1}),
+                    {noreply, State}
+            end
     end;
 
 

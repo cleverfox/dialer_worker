@@ -8,5 +8,6 @@
 {ok,{31337,"2","1564",timeout,undefined,undefined,t}} - timeout
 {ok,{31337,"2","0665",res,"Failure","5",t}} - busy
 {ok,{31337,"2","3571",res,"Failure","3",t}} - noanswer
+{ok,{31337,"2","3571",res,"Failure","8",t}} - Congestio
 {ok,{31337,"4","3571",hup,"Success","4",t}} - success
 

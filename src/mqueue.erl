@@ -15,7 +15,7 @@
 -define(SERVER, ?MODULE). 
 
 -record(state, {dict}).
--record(job, {jid,nid,pid,data}).
+-record(job, {jid,nid,pid,data,is,ib,in}).
 
 %%%===================================================================
 %%% API
@@ -118,19 +118,34 @@ handle_cast(_Msg, State) ->
 %%--------------------------------------------------------------------
 try_run_job(PArg,State) ->
     case PArg of 
-        {A1,A2,A3} ->
+        {A1,A2,A3,Is,Ib,In,A7} ->
             Jid=list_to_integer(binary_to_list(A1)),
             Nid=list_to_integer(binary_to_list(A2)),
+            Tgt=binary_to_list(A7),
             Num=binary_to_list(A3),
             case dict:find({job,Jid},State#state.dict) of
                 {ok, _Job} ->
                     {already_running,State};
                 error ->
-                    Arg=[{ext,Num},{grp,"2"},{timeout,60000}],
+                    {Tex, Tco } = case string:tokens(Tgt,"@") of
+                        [ X ] ->
+                            { X, "dialout" };
+                        [ X , Y ] ->
+                            { X, Y }
+                    end,
+                    Arg=[{ext,Num},{grp,"2"},{timeout,60000},{target,Tex},{context,Tco}],
                     case calljob:run(Jid,Arg) of 
                         {ok, Pid} ->
                             S1=State#state.dict,
-                            S2=dict:store({job,Jid},#job{pid=Pid,jid=Jid,nid=Nid,data=Arg},S1),
+                            S2=dict:store({job,Jid},#job{
+                                    pid=Pid,
+                                    jid=Jid,
+                                    nid=Nid,
+                                    data=Arg,
+                                    is=list_to_integer(binary_to_list(Is)),
+                                    ib=list_to_integer(binary_to_list(Ib)),
+                                    in=list_to_integer(binary_to_list(In))
+                                },S1),
                             S3=dict:store({pid,Pid},Jid,S2),
                             {ok,State#state{dict=S3}};
                         _ ->
@@ -146,18 +161,25 @@ iter_jobs([],State) ->
    State; 
 
 iter_jobs([R|X],State) ->
-    {Jid,Nid,Num}=R,
-    lager:info("Call job ~p, number ~p: ~p~n",[Jid,Nid,Num]),
+    {Jid,Nid,Num,_Is,_Ib,_In,Tgt}=R,
+    lager:info("Call job ~p, number ~p: ~p to ~p ~n",[Jid,Nid,Num,Tgt]),
     {_,St1}=try_run_job(R,State),
     iter_jobs(X,St1).
 
 handle_info(queue_run, State) ->
     lager:info("Queue run~n",[]),
-    L=["SELECT j.id,jn.id,jn.number from job j inner join ",
+    L=["SELECT ",
+        "j.id,jn.id,jn.number,",
+        "EXTRACT(EPOCH FROM j.interval_success),",
+        "EXTRACT(EPOCH FROM j.interval_busy),",
+        "EXTRACT(EPOCH FROM j.interval_na),",
+        "target ",
+        " from job j inner join ",
         "job_numbers jn on jn.job_id=j.id where now()::time ",
-        "between allowed_times and allowed_timee and (next_try ",
-        "is null or next_try <now()) and (j.next_number_id is ",
-        "null or j.next_number_id = jn.id)"],
+        "between allowed_times and allowed_timee and ",
+        " (j.next_try is null or j.next_try <now()) and ",
+        " (jn.next_try is null or jn.next_try <now()) and ",
+        " (j.next_number_id is null or j.next_number_id = jn.id)"],
     case squery(lists:flatten(L)) of
         {ok, _X, Res} ->
             lager:info("Call job ~p ~n",[Res]),
@@ -237,25 +259,41 @@ complete_job(Jid,Data,State) ->
     lager:info("complete_job ~p ~n~p ~p~n",[Jid,Data,field1(nid,Data,not_found)]),
     case dict:find({job,Jid},State#state.dict) of
                 {ok, Job} ->
-                    Myres=case {field1(status,Data,none),field1(res_txt,Data,none),field1(res_num,Data,none)} of
+                    {Myres,Nexttry,Gtry}=case {
+                            field1(status,Data,none),
+                            field1(res_txt,Data,none),
+                            field1(res_num,Data,none)
+                        } of
                         {hup, "Success", "4"} ->
-                            "Success";
+                            {"Success", Job#job.is, Job#job.is};
                         {timeout, _, _ } ->
-                            "Timeout";
+                            {"Timeout", 5, false};
                         {res, "Failure", "5" } ->
-                            "Busy";
+                            {"Busy", Job#job.ib, false};
                         {res, "Failure", "3" } ->
-                            "NotAnswer";
+                            {"NotAnswer", Job#job.in, false};
                         {res, "Failure", "8" } ->
-                            "Congestion";
+                            {"Congestion", Job#job.in, false};
                         _ ->
-                            "Unknown"
+                            {"Unknown",null,0}
                     end,
-                    lager:info("complete ~p ~p ~n",[Myres,Job]),
+                    lager:info("complete ~p ~p ~p ~p ~n",[Myres,Job,Nexttry,Gtry]),
                     equery(
                         "insert into job_log(job_id,number_id,result,duration) values($1,$2,$3,$4*'1 sec'::interval)",
                         [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end]
                     ),
+                    lager:info("update num Jid#~p=~p, Nid#~p=~p",[ Job#job.jid, Gtry, Job#job.nid, Nexttry  ]),
+                    equery( 
+                        "update job_numbers set last_attempt=now(), last_result=$1, next_try=now()+$4*'1 sec'::interval where job_id=$2 and id=$3",
+                        [ Myres, Job#job.jid, Job#job.nid, Nexttry ]),
+                    case is_integer(Gtry) of 
+                        true -> 
+                            equery( 
+                                "update job set next_try=now()+$1*'1 sec'::interval where id=$2",
+                            [ Gtry, Job#job.jid ]);
+                        _ -> ok
+                    end,
+                            
                     State;
                 error ->
                     State

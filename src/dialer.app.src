@@ -15,20 +15,24 @@
       {db_name,"dialer"},
       {db_user,"postgres"},
       {db_pass,""},
-      {ami_host, "127.0.0.1"},
-      {ami_host, "192.168.252.1"},
+      {ami_host, emulator},
+      {ami_emulator, {0.1, 0.3, 0.5}},
+      %{ami_host, "192.168.252.1"},
       {ami_port, 6038}, 
       {ami_username, "viruzzz"},
       {ami_secret, "takida"},
       {ami_call_channel,"IAX2/xhome/~s~s"},
       {ami_template, [ 
-          {'Action',"Originate"},
-          {'Context', "advert"},
-          {'Exten',"1"},
-          {'Priority',"1"},
-          {'Callerid',"123000"},
-          {'Timeout',"20000"},
-          {'Async',"1"}
+          {"Action","Originate"},
+          {"Context", context},
+          {"Channel",channel},
+          {"Exten",target},
+          {"Priority","1"},
+          {"Callerid","123000"},
+          {"Timeout","20000"},
+          {"ActionID",chan},
+          {"Account",chan},
+          {"Async","1"}
           ]}
  ]} %%env
 ]}. %%application
