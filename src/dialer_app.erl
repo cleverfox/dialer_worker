@@ -118,6 +118,16 @@ init([]) ->
            [ami_server]                            % Modules  = [Module] | dynamic
        },
 
+      {   meteor,                             % Id       = internal id
+           {meteor,start_link,
+               [env,env]
+           },             % StartFun = {M, F, A}
+           permanent,                               % Restart  = permanent | transient | temporary
+           2000,                                    % Shutdown = brutal_kill | int() >= 0 | infinity
+           worker,                                  % Type     = worker | supervisor
+           [meteor]                            % Modules  = [Module] | dynamic
+       },
+
 
        {   auth_server,                             % Id       = internal id
 	   {auth_server,start_link,[]},             % StartFun = {M, F, A}
