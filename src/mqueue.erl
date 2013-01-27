@@ -54,7 +54,7 @@ start_link() ->
 %%--------------------------------------------------------------------
 init([]) ->
     lager:info("~p started~n",[?MODULE]),
-%    erlang:send_after(5000, self(), queue_run),
+    erlang:send_after(5000, self(), queue_run),
     {ok, #state{dict=dict:new(),lock=dict:new()}}.
 
 %%--------------------------------------------------------------------
@@ -133,7 +133,7 @@ get_channel(Num,Dict) ->
                                 true ->
                                     Acc;
                                 false ->
-                                    {NID,NChan,NInt, dict:store(NID,Num,Dict0)}
+                                    {NID,NChan,binary_to_list(NInt), dict:store(NID,Num,Dict0)}
                             end;
                         _ -> 
                             Acc
@@ -153,15 +153,11 @@ try_run_job(PArg,State) ->
                 {ok, _Job} ->
                     {already_running,State};
                 error ->
-
-
-
                     {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock),
                     case NChan of
                         undef ->
                             {everything_busy, State};
                         _ ->
-
                             Nid=list_to_integer(binary_to_list(A2)),
                             Tgt=binary_to_list(A7),
 
@@ -173,7 +169,7 @@ try_run_job(PArg,State) ->
                                 _ ->
                                     { "000", "advert" }
                             end,
-                            Arg=[{ext,Num},{grp,"3"},{timeout,60000},{target,Tex},{context,Tco},{chan,NChan},{interface,NInt}],
+                            Arg=[{ext,Num},{grp,NChan},{modemid,NID},{timeout,60000},{target,Tex},{context,Tco},{channel,NInt}],
                             case calljob:run(Jid,Arg) of 
                                 {ok, Pid} ->
                                     meteor:json("push",[{"dtype","job_run"},{"did",Jid},{"nid",Nid},{"number",Num}]),
@@ -210,7 +206,7 @@ iter_jobs([R|X],State) ->
     iter_jobs(X,St1).
 
 handle_info(queue_run, State) ->
-    lager:info("Queue run~n",[]),
+    %lager:info("Queue run~n",[]),
     L=["SELECT ",
         "j.id,jn.id,jn.number,",
         "EXTRACT(EPOCH FROM j.interval_success),",
@@ -229,7 +225,7 @@ handle_info(queue_run, State) ->
 %            lager:info("Call job ~p ~n",[Res]),
             case Res of
                 [] ->
-                    erlang:send_after(5000, self(), queue_run),
+                    erlang:send_after(10000, self(), queue_run),
                     {noreply, State};
                 [_|_] ->
                     erlang:send_after(30000, self(), queue_run),
@@ -265,7 +261,8 @@ handle_info({'EXIT',Pid,_}, State) ->
             lager:info("Calljob process ~p dead (~p)~n",[Pid,Job]),
             D2=dict:erase({pid, Pid}, D1),
             D3=dict:erase({job, Jid}, D2),
-            {noreply, State#state{dict=D3}};
+            L2=dict:erase(Job#job.chid, State#state.lock),
+            {noreply, State#state{dict=D3,lock=L2}};
         false ->
             lager:info("Dead unknown process ~p ~n",[Pid]),
             {noreply, State}
@@ -303,6 +300,36 @@ code_change(_OldVsn, State, _Extra) ->
 %gettype(X) when is_reference(X) -> reference;
 %gettype(X) when is_tuple(X) -> tuple;
 %gettype(_X) -> other.
+mergedb_parseinterval({{Ch,Cm,Cs},CD,CM}) ->
+    Str=[case CM of 
+            0 ->
+                "";
+            _ ->
+                integer_to_list(CM)++" mon "
+        end,
+        case CD of 
+            0 ->
+                "";
+            1 -> 
+                "1 day ";
+            _ ->
+                integer_to_list(CD)++" days "
+        end,
+        case {Ch,Cm,Cs} of 
+            {0,0,_} ->
+                integer_to_list(trunc(Cs))++" sec";
+            {0,_,0} ->
+                integer_to_list(Cm)++" min";
+            {1,0,0} ->
+                "1 hour";
+            {_,0,0} ->
+                integer_to_list(Ch)++" hours";
+            {_,_,_} ->
+                io_lib:format("~2..0w:~2..0w:~2..0w",[Ch,Cm,trunc(Cs)])
+        end
+    ],
+    lists:flatten(Str).
+
 
 mergedb([],[]) ->
     [];
@@ -349,8 +376,8 @@ mergedb([{column,Name,Type,_,_,_}|Xl],[Cs|Y]) ->
             end;
         interval ->
             case C1 of
-                {{Ca,Cb,Cc},Cd,Ce} ->
-                    {binary_to_list(Name),io_lib:format("~p ~p ~p ~p ~p",[Ca,Cb,Cc,Cd,Ce])};
+                {{_,_,_},_,_} ->
+                    {binary_to_list(Name),mergedb_parseinterval(C1)};
                 CAll1 when is_list(CAll1) ->
                     {binary_to_list(Name),CAll1};
                 _ ->
@@ -382,7 +409,7 @@ field1(Field,Arg,False) ->
     end.
 
 complete_job(Jid,Data,State) ->
-    lager:info("complete_job ~p ~n~p ~p~n",[Jid,Data,field1(nid,Data,not_found)]),
+    lager:info("complete_job ~p ~n~p~n",[Jid,Data]),
     case dict:find({job,Jid},State#state.dict) of
                 {ok, Job} ->
                     {Myres,Nexttry,Gtry}=case {
@@ -403,12 +430,12 @@ complete_job(Jid,Data,State) ->
                         _ ->
                             {"Unknown",null,0}
                     end,
-                    lager:info("complete ~p ~p ~p ~p ~n",[Myres,Job,Nexttry,Gtry]),
+                    %lager:info("complete ~p ~p ~p ~p ~n",[Myres,Job,Nexttry,Gtry]),
                     R0a=equery(
-                        "insert into job_log(job_id,number_id,result,duration) values($1,$2,$3,$4*'1 sec'::interval) returning id",
-                        [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end]
+                        "insert into job_log(job_id,number_id,result,duration,ivrres) values($1,$2,$3,$4*'1 sec'::interval,$5) returning id",
+                        [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end,field1(ivrres,Data,null)]
                     ),
-                    lager:info("R0: ~p~n",[R0a]),
+                    %lager:info("R0: ~p~n",[R0a]),
                     {ok, _, _, [{LogId}]} = R0a,
 
                     QFields=["job_log.id", "job_log.job_id", "job_log.number_id", "job_log.t", "job_log.result", "job_log.duration", "job.description", "job_numbers.number"],
@@ -421,7 +448,7 @@ complete_job(Jid,Data,State) ->
                         "left join job_numbers on job_numbers.id=job_log.number_id where job_log.id=$1" ,
                         [ LogId]
                     ),
-                    lager:info("R0: ~p~n",[R0b]),
+                    %lager:info("R0: ~p~n",[R0b]),
                     {ok, C0, [V0]} = R0b,
                     T0=[{"dtype","job_log"}|mergedb(C0,tuple_to_list(V0))],
                     meteor:json("push",T0),

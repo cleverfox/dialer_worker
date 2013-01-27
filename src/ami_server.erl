@@ -19,14 +19,15 @@
 -define(SERVER, ?MODULE). 
 
 -record(state, {socket,host,port,username,secret,state,buffer,job,cntr}).
--record(job, {jobid,uniqid,uid,from,ext,state,res,reason,echan,hup,huptxt,timeout,callnum,start}).
+-record(job,
+    {modemid,uniqid,uid,from,ext,state,res,reason,echan,hup,huptxt,timeout,callnum,start,ivrres}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-originate(UID,Chan,Ext,Timeout,Args) -> 
-    gen_server:call(?MODULE, {originate,UID,Chan,Ext,Timeout,Args}, 600000).
+originate(UID,MID,Ext,Timeout,Args) -> 
+    gen_server:call(?MODULE, {originate,UID,MID,Ext,Timeout,Args}, 600000).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -86,17 +87,22 @@ rnd(Prob) ->
     [Rnd|_]=binary_to_list(crypto:rand_bytes(1)),
     Rnd/256 < Prob.
         
-handle_call({originate,UID,Chan,Ext,Timeout,Args}, From, 
+handle_call({originate,UID,MID,Ext,Timeout,Args}, From, 
     #state{ job = Job, cntr=Cnt} = State) ->
-    lager:info("Originate ~p ~p, F ~p, S ~p~n",[Chan,Ext,From,State]),
-    Channel=case application:get_env(ami_call_channel) of
-        {ok, Xval1} ->
-            io_lib:format(Xval1,[Chan,Ext])
+    Channel=case lists:keyfind(channel,1,Args) of
+        {channel, CustChan} ->
+            lists:flatten(io_lib:format(CustChan,[Ext]));
+        _ ->
+            case application:get_env(ami_call_channel) of
+                {ok, Xval1} ->
+                    io_lib:format(Xval1,[MID,Ext])
+            end
     end,
     Tpl=case application:get_env(ami_template) of
         {ok, Xval2} ->
             Xval2
     end,
+    lager:info("Originate ~p ~p~n",[Channel,Args]),
     %Ar1=[
     %    {"Channel",Channel},
     %    {"ActionID",Chan},
@@ -108,7 +114,7 @@ handle_call({originate,UID,Chan,Ext,Timeout,Args}, From,
                 true ->
                     case B of
                         channel -> Channel; 
-                        chan -> Chan; 
+                        chan -> MID; 
                         _ -> 
                             case lists:keyfind(B,1,Args) of
                                 {B, Val} -> Val;
@@ -136,20 +142,20 @@ handle_call({originate,UID,Chan,Ext,Timeout,Args}, From,
             Reply=case rnd(Prob_Ans) of
                 true ->
                     timer:sleep(5000),
-                    {ok,{UID,Chan,Ext,hup,"Success","4",5}};
+                    {ok,{UID,MID,Ext,hup,"Success","4",5}};
                 false ->
                     case rnd(Prob_Busy) of
                         true ->
                             timer:sleep(2000),
-                            {ok,{UID,Chan,Ext,res,"Failure","5",0}};
+                            {ok,{UID,MID,Ext,res,"Failure","5",0}};
                         false ->
                             case rnd(Prob_NA) of
                                 true ->
                                     timer:sleep(7000),
-                                    {ok,{UID,Chan,Ext,res,"Failure","3",0}};
+                                    {ok,{UID,MID,Ext,res,"Failure","3",0}};
                                 false ->
                                     timer:sleep(1000),
-                                    {ok,{UID,Chan,Ext,res,"Failure","8",0}}
+                                    {ok,{UID,MID,Ext,res,"Failure","8",0}}
                             end
                     end
             end,
@@ -170,7 +176,7 @@ handle_call({originate,UID,Chan,Ext,Timeout,Args}, From,
             %        {"Account",Chan},
             %        {"Async","1"}
             %    ]),
-            Job1=lists:append(Job,[#job{uid=UID,jobid=Chan,from=From,ext=Ext,state=init,callnum=Cnt}]),
+            Job1=lists:append(Job,[#job{uid=UID,modemid=MID,from=From,ext=Ext,state=init,callnum=Cnt,ivrres=null}]),
             erlang:send_after(Timeout, self(), {handletimeout, Cnt}),
             {noreply, State#state{job=Job1,cntr=Cnt+1}, 1200000}
     end;
@@ -385,7 +391,16 @@ splitandtrim(X) ->
     splitandtrim(X,"","",1).
 
 join_req(List) ->
-    lists:flatten([lists:map(fun({X,Y}) -> [X,": ",Y,"\r\n"] end,List)|"\r\n"]).
+    lists:flatten([lists:map(fun({X,Y}) -> [X,": ",
+                            case Y of
+                                I when is_integer(I) ->
+                                    integer_to_list(I);
+                                L when is_list(L) ->
+                                    L;
+                                B when is_binary(B) ->
+                                    binary_to_list(B)
+                            end
+                                ,"\r\n"] end,List)|"\r\n"]).
 
 sendData(#state{socket=Sock}=_State,Array) ->
     lager:info("Send(~p)~n",[Array]),
@@ -395,11 +410,11 @@ sendData(#state{socket=Sock}=_State,Array) ->
 make_reply(Res,JSta) ->
     Reply=case Res of 
         none ->
-            {JSta#job.uid,JSta#job.jobid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
-                undef};
+            {JSta#job.uid,JSta#job.modemid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
+                undef,JSta#job.ivrres};
         duration ->
-            {JSta#job.uid,JSta#job.jobid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
-                calendar:datetime_to_gregorian_seconds({date(),time()})-JSta#job.start}
+            {JSta#job.uid,JSta#job.modemid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
+                calendar:datetime_to_gregorian_seconds({date(),time()})-JSta#job.start,JSta#job.ivrres}
     end,    
     gen_server:reply(JSta#job.from,{ok,Reply}).
 
@@ -424,8 +439,16 @@ handle_data(State,[Action|Array]) ->
                 {"Response","Success"} ->
                     case lists:keyfind("ActionID",1,Array) of
                         {"ActionID",ID} ->
-                            JSta=lists:keyfind(ID,#job.jobid,State#state.job),
-                            JSta#job{state=queue};
+                            JSta=lists:keyfind(list_to_integer(ID),#job.modemid,State#state.job),
+                            case JSta of
+                                false ->
+                                    lager:info("WTF? ~p ~p",[Action, Array]), 
+                                    lager:info("Job ~p",[State#state.job]), 
+                                    lager:info("State ~p",[State]), 
+                                    undef;
+                                _ ->
+                                    JSta#job{state=queue}
+                            end;
                         _ ->
                             undefined
                     end;
@@ -433,7 +456,7 @@ handle_data(State,[Action|Array]) ->
                 %    undefined;
                 {"Event","OriginateResponse"} ->
                     {"ActionID",ID}=lists:keyfind("ActionID",1,Array),
-                    JSta=lists:keyfind(ID,#job.jobid,State#state.job),
+                    JSta=lists:keyfind(list_to_integer(ID),#job.modemid,State#state.job),
 %                    io:format("List ~p~n Found ~p~n",[State#state.job,JSta]),
                     case JSta of
                         false ->
@@ -463,9 +486,19 @@ handle_data(State,[Action|Array]) ->
                                 progress ->
                                     {_,Hup}=lists:keyfind("Cause",1,Array), 
                                     {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
-                                    NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt},
+                                    IvrRes=case lists:keyfind("CallerIDName",1,Array) of
+                                        {"CallerIDName","IVRRES"} ->
+                                            case lists:keyfind("CallerIDNum",1,Array) of
+                                                {_, Val} -> Val;
+                                                _ -> 
+                                                    null
+                                            end;
+                                        _ ->
+                                            null
+                                    end, 
+                                    NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt,ivrres=IvrRes},
                                     make_reply(duration,NSta),
-                                    {finish, NSta#job.jobid};
+                                    {finish, NSta#job.modemid};
                                 _ ->
                                     {_,Hup}=lists:keyfind("Cause",1,Array), 
                                     {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
@@ -474,7 +507,7 @@ handle_data(State,[Action|Array]) ->
                     end;
                 {"Event","NewAccountCode"} -> 
                     {"AccountCode",ID}=lists:keyfind("AccountCode",1,Array),
-                    JSta=lists:keyfind(ID,#job.jobid,State#state.job),
+                    JSta=lists:keyfind(list_to_integer(ID),#job.modemid,State#state.job),
                     {"Channel",EC}=lists:keyfind("Channel",1,Array),
                     {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
                     JSta#job{state=queue,uniqid=UID,echan=EC};
@@ -487,7 +520,7 @@ handle_data(State,[Action|Array]) ->
                     State;
                 {finish, JID} ->
                     J=lists:delete(undef,lists:map(fun(X) -> 
-                                case X#job.jobid == JID of 
+                                case X#job.modemid== JID of 
                                     true -> undef;
                                     _ -> X
                                 end
@@ -495,7 +528,7 @@ handle_data(State,[Action|Array]) ->
                     State#state{job=J};
                 _ -> 
                     J=lists:map(fun(X) -> 
-                                case X#job.jobid == M#job.jobid of 
+                                case X#job.modemid == M#job.modemid of 
                                     true -> M;
                                     _ -> X
                                 end
