@@ -15,7 +15,7 @@
 -define(SERVER, ?MODULE). 
 
 -record(state, {dict,lock}).
--record(job, {jid,nid,pid,data,is,ib,in,chid}).
+-record(job, {jid,nid,pid,data,tpl,chid}).
 
 %%%===================================================================
 %%% API
@@ -146,7 +146,7 @@ get_channel(Num,Dict) ->
 
 try_run_job(PArg,State) ->
     case PArg of 
-        {A1,A2,A3,Is,Ib,In,A7} ->
+        {A1,A2,A3,A4,A5} ->
             Jid=list_to_integer(binary_to_list(A1)),
             Num=binary_to_list(A3),
             case dict:find({job,Jid},State#state.dict) of
@@ -159,7 +159,7 @@ try_run_job(PArg,State) ->
                             {everything_busy, State};
                         _ ->
                             Nid=list_to_integer(binary_to_list(A2)),
-                            Tgt=binary_to_list(A7),
+                            Tgt=binary_to_list(A5),
 
                             {Tex, Tco } = case string:tokens(Tgt,"@") of
                                 [ X ] ->
@@ -180,9 +180,7 @@ try_run_job(PArg,State) ->
                                             nid=Nid,
                                             data=Arg,
                                             chid=NID,
-                                            is=list_to_integer(binary_to_list(Is)),
-                                            ib=list_to_integer(binary_to_list(Ib)),
-                                            in=list_to_integer(binary_to_list(In))
+                                            tpl=list_to_integer(binary_to_list(A4))
                                         },S1),
                                     S3=dict:store({pid,Pid},Jid,S2),
                                     {ok,State#state{dict=S3,lock=NLock}};
@@ -200,26 +198,21 @@ iter_jobs([],State) ->
    State; 
 
 iter_jobs([R|X],State) ->
-    {Jid,Nid,Num,_Is,_Ib,_In,Tgt}=R,
+    {Jid,Nid,Num,_Tpl,Tgt}=R,
     lager:info("Call job ~p, number ~p: ~p to ~p ~n",[Jid,Nid,Num,Tgt]),
     {_,St1}=try_run_job(R,State),
     iter_jobs(X,St1).
 
 handle_info(queue_run, State) ->
     %lager:info("Queue run~n",[]),
-    L=["SELECT ",
-        "j.id,jn.id,jn.number,",
-        "EXTRACT(EPOCH FROM j.interval_success),",
-        "EXTRACT(EPOCH FROM j.interval_busy),",
-        "EXTRACT(EPOCH FROM j.interval_na),",
-        "target ",
-        " from job j inner join ",
-        "job_numbers jn on jn.job_id=j.id where ",
-        " now()::time between allowed_times and allowed_timee and ",
-        " jn.active=true and ",
-        " (j.next_try is null or j.next_try <now()) and ",
-        " (jn.next_try is null or jn.next_try <now()) order by jn.last_attempt asc" ],
-%    lager:info("SQL: ~p",[lists:flatten(L)]),
+    L=["SELECT j.id, jn.id,jn.number,t.id,t.exten ",
+        "from job j inner join job_numbers jn on jn.job_id=j.id ",
+        "inner join template t on t.id=j.template_id where ",
+        "now()::time between allowed_times and allowed_timee and ",
+        "jn.active=true and  (j.next_try is null or j.next_try <now()) and ",
+        "(jn.next_try is null or jn.next_try <now()) order by jn.last_attempt asc;"],
+
+    lager:info("SQL: ~p",[lists:flatten(L)]),
     case squery(lists:flatten(L)) of
         {ok, _X, Res} ->
 %            lager:info("Call job ~p ~n",[Res]),
@@ -407,26 +400,40 @@ field1(Field,Arg,False) ->
         _ -> 
             False
     end.
+lookup_tpl_act(Tpl,Res,IvrRes) ->
+    TO=equery("SELECT continue,extract(epoch from npause),extract(epoch from pause),info,warning from template_actions where template_id=$1 and result_id="++
+        "(SELECT * from call_result where result=$2 and (ivrres=$3 or ivrres is null) order by ivrres limit 1);",
+        [Tpl,Res,IvrRes]),
+    case TO of
+        {ok, _, [{C,N,P,I,W}]} ->
+            {C,N,P,I,W};
+        _ ->
+            {true,3600,3600,true,false} 
+    end.
 
 complete_job(Jid,Data,State) ->
     lager:info("complete_job ~p ~n~p~n",[Jid,Data]),
     case dict:find({job,Jid},State#state.dict) of
                 {ok, Job} ->
-                    {Myres,Nexttry,Gtry}=case {
+                    {Myres,Nexttry,Gtry,Cont,Info,Warn}=case {
                             field1(status,Data,none),
                             field1(res_txt,Data,none),
                             field1(res_num,Data,none)
                         } of
                         {hup, "Success", "4"} ->
-                            {"Success", Job#job.is, Job#job.is};
+                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Success",field1(ivrres,Data,null)),
+                            {"Success", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
                         {timeout, _, _ } ->
-                            {"Timeout", 5, false};
+                            {"Timeout", 60, false};
                         {res, "Failure", "5" } ->
-                            {"Busy", Job#job.ib, false};
+                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Busy",null),
+                            {"Busy", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
                         {res, "Failure", "3" } ->
-                            {"NotAnswer", Job#job.in, false};
+                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"NotAnswer",null),
+                            {"NotAnswer", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
                         {res, "Failure", "8" } ->
-                            {"Congestion", Job#job.in, false};
+                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Congestion",null),
+                            {"Congestion", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
                         _ ->
                             {"Unknown",null,0}
                     end,
@@ -453,9 +460,6 @@ complete_job(Jid,Data,State) ->
                     T0=[{"dtype","job_log"}|mergedb(C0,tuple_to_list(V0))],
                     meteor:json("push",T0),
 
-
-
-
                     lager:info("update num Jid#~p=~p, Nid#~p=~p",[ Job#job.jid, Gtry, Job#job.nid, Nexttry  ]),
                     equery( 
                         "update job_numbers set last_attempt=now(), last_result=$1, next_try=now()+$4*'1 sec'::interval where job_id=$2 and id=$3",
@@ -473,8 +477,8 @@ complete_job(Jid,Data,State) ->
                     case is_integer(Gtry) of 
                         true -> 
                             M=equery( 
-                                "update job set next_try=now()+$1*'1 sec'::interval where id=$2",
-                                [ Gtry, Job#job.jid ]),
+                                "update job set next_try=now()+$1*'1 sec'::interval, active=active and $3 where id=$2",
+                                [ Gtry, Job#job.jid, Cont ]),
                             Q2=lists:flatten(["select id,description,allowed_times,",
                                     "allowed_timee, interval_success, interval_busy,",
                                     "interval_na, next_try, target ",
@@ -488,6 +492,24 @@ complete_job(Jid,Data,State) ->
                         _ -> ok
                     end,
                     meteor:json("push",[{"dtype","job_end"},{"did",Jid},{"nid",Job#job.nid},{"res",Myres}]),
+
+                    case Warn of
+                        true ->
+                            ok;
+                        _ ->
+                            ok
+                    end,
+
+                    case Info of
+                        true ->
+                            ok;
+                        _ ->
+                            ok
+                    end,
+                    %lager:info("R0: ~p~n",[R0a]),
+                    {ok, _, _, [{LogId}]} = R0a,
+
+
                             
                     State;
                 error ->
