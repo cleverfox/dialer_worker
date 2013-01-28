@@ -210,7 +210,7 @@ handle_info(queue_run, State) ->
         "inner join template t on t.id=j.template_id where ",
         "now()::time between allowed_times and allowed_timee and ",
         "jn.active=true and  (j.next_try is null or j.next_try <now()) and ",
-        "(jn.next_try is null or jn.next_try <now()) order by jn.last_attempt asc;"],
+        "(jn.next_try is null or jn.next_try <now()) and j.active=true order by jn.last_attempt asc;"],
 
     lager:info("SQL: ~p",[lists:flatten(L)]),
     case squery(lists:flatten(L)) of
@@ -378,8 +378,23 @@ mergedb([{column,Name,Type,_,_,_}|Xl],[Cs|Y]) ->
             end;
          timestamp ->
             case C1 of
-                {{CY,CM,CD},{Ch,Cm,Cs}} ->
-                    {binary_to_list(Name),io_lib:format("~p ~p ~p ~p:~p~i",[CD,CM,CY,Ch,Cm,Cs])};
+                {{CdY,CdM,CdD},{Cdh,Cdm,Cds}} ->
+                    _Month=case CdM of
+                                    1 -> "Jan";
+                                    2 -> "Feb";
+                                    3 -> "Mar";
+                                    4 -> "Apr";
+                                    5 -> "May";
+                                    6 -> "Jun";
+                                    7 -> "Jul";
+                                    8 -> "Aug";
+                                    9 -> "Sep";
+                                    10 -> "Oct";
+                                    11 -> "Nov";
+                                    12 -> "Dec";
+                                    _ -> "___"
+                            end,
+                    {binary_to_list(Name),io_lib:format("~4..0w-~2..0w-~2..0w ~2..0w:~2..0w:~2..0w",[CdY,CdM,CdD,Cdh,Cdm,trunc(Cds)])};
                 CAll when is_list(CAll) ->
                     {binary_to_list(Name),CAll};
                 _ ->
@@ -401,13 +416,15 @@ field1(Field,Arg,False) ->
             False
     end.
 lookup_tpl_act(Tpl,Res,IvrRes) ->
-    TO=equery("SELECT continue,extract(epoch from npause),extract(epoch from pause),info,warning from template_actions where template_id=$1 and result_id="++
-        "(SELECT * from call_result where result=$2 and (ivrres=$3 or ivrres is null) order by ivrres limit 1);",
+    TO=equery("SELECT continue,extract(epoch from npause),extract(epoch from pause),info,warning,result_id from template_actions where template_id=$1 and result_id="++
+        "(SELECT id from call_result where result=$2 and (ivrres=$3 or ivrres is null) order by ivrres limit 1);",
         [Tpl,Res,IvrRes]),
     case TO of
-        {ok, _, [{C,N,P,I,W}]} ->
-            {C,N,P,I,W};
+        {ok, _, [{C,N,P,I,W,R}]} ->
+            lager:info("Job result (~p,~p,~p) = ~p (~p, ~p, ~p, ~p, ~p)",[Tpl,Res,IvrRes,R,C,N,P,I,W]),
+            {C,erlang:trunc(N),erlang:trunc(P),I,W};
         _ ->
+            lager:info("Job result (~p,~p,~p) not found",[Tpl,Res,IvrRes]),
             {true,3600,3600,true,false} 
     end.
 
@@ -437,7 +454,7 @@ complete_job(Jid,Data,State) ->
                         _ ->
                             {"Unknown",null,0}
                     end,
-                    %lager:info("complete ~p ~p ~p ~p ~n",[Myres,Job,Nexttry,Gtry]),
+                    lager:info("complete ~p ~p ~p ~p cont ~s ~n",[Myres,Job,Nexttry,Gtry,Cont]),
                     R0a=equery(
                         "insert into job_log(job_id,number_id,result,duration,ivrres) values($1,$2,$3,$4*'1 sec'::interval,$5) returning id",
                         [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end,field1(ivrres,Data,null)]
@@ -481,7 +498,7 @@ complete_job(Jid,Data,State) ->
                                 [ Gtry, Job#job.jid, Cont ]),
                             Q2=lists:flatten(["select id,description,allowed_times,",
                                     "allowed_timee, interval_success, interval_busy,",
-                                    "interval_na, next_try, target ",
+                                    "interval_na, next_try, target, active ",
                                     " from job where id=", integer_to_list(Jid), ";"]),
                             R2=squery(Q2),
                             {ok, C2, [V2]} = R2,
@@ -493,19 +510,36 @@ complete_job(Jid,Data,State) ->
                     end,
                     meteor:json("push",[{"dtype","job_end"},{"did",Jid},{"nid",Job#job.nid},{"res",Myres}]),
 
-                    case Warn of
+                    case Warn or Info of
                         true ->
+                            R3=equery(
+                                "insert into notification(job_id,number_id,result,ivrres,warning) values($1,$2,$3,$4,$5) returning id",
+                                [ Job#job.jid, Job#job.nid, Myres, field1(ivrres,Data,null), Warn]
+                            ),
+                            {ok, _, _, [{NotId}]} = R3,
+
+
+                            Q1Fields=["notification.id", "notification.job_id", "notification.number_id", "notification.t", "notification.result", "job.description", "job_numbers.number", "notification.warning", "notification.ivrres"],
+                            Q1Fields1=lists:flatten([ X ++ " as \"" ++ X ++ "\"," || X <- Q1Fields]),
+                            Q1Fields2=lists:sublist(Q1Fields1,length(Q1Fields1)-1),
+
+                            R3b=equery(
+                                "select "++Q1Fields2++
+                                " from notification left join job on job.id=notification.job_id "++
+                                "left join job_numbers on job_numbers.id=notification.number_id where notification.id=$1" ,
+                                [ NotId]
+                            ),
+
+                            %R3b=equery( "select * from notification where id=$1", [ NotId]),
+                            lager:info("R0: ~p~n",[R3b]),
+                            {ok, C3, [V3]} = R3b,
+                            T3=[{"dtype","notification"}|mergedb(C3,tuple_to_list(V3))],
+                            meteor:json("push",T3),
                             ok;
                         _ ->
                             ok
                     end,
 
-                    case Info of
-                        true ->
-                            ok;
-                        _ ->
-                            ok
-                    end,
                     %lager:info("R0: ~p~n",[R0a]),
                     {ok, _, _, [{LogId}]} = R0a,
 
