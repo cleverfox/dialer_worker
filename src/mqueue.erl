@@ -169,7 +169,9 @@ try_run_job(PArg,State) ->
                                 _ ->
                                     { "000", "advert" }
                             end,
-                            Arg=[{ext,Num},{grp,NChan},{modemid,NID},{timeout,60000},{target,Tex},{context,Tco},{channel,NInt}],
+                            Cdrfile=io_lib:format("~w-~w",[Jid,timer:now_diff(now(), {0,0,0}) div 1000000]),
+                            Arg=[{ext,Num},{grp,NChan},{modemid,NID},{timeout,60000},{target,Tex},{context,Tco},{channel,NInt},
+                                {cdrfile,Cdrfile}],
                             case calljob:run(Jid,Arg) of 
                                 {ok, Pid} ->
                                     meteor:json("push",[{"dtype","job_run"},{"did",Jid},{"nid",Nid},{"number",Num}]),

@@ -98,9 +98,15 @@ handle_call({originate,UID,MID,Ext,Timeout,Args}, From,
                     io_lib:format(Xval1,[MID,Ext])
             end
     end,
+    Cdr=case lists:keyfind(cdrfile,1,Args) of
+        {cdrfile, Filename} ->
+            [{"Variable", lists:flatten("cdrfile="++Filename)}];
+        _ ->
+            []
+    end,
     Tpl=case application:get_env(ami_template) of
         {ok, Xval2} ->
-            Xval2
+            Xval2++Cdr
     end,
     lager:info("Originate ~p ~p~n",[Channel,Args]),
     %Ar1=[
