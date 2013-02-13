@@ -15,7 +15,7 @@
 -define(SERVER, ?MODULE). 
 
 -record(state, {dict,lock}).
--record(job, {jid,nid,pid,data,tpl,chid}).
+-record(job, {jid,nid,pid,data,tpl,chid,rec}).
 
 %%%===================================================================
 %%% API
@@ -182,6 +182,7 @@ try_run_job(PArg,State) ->
                                             nid=Nid,
                                             data=Arg,
                                             chid=NID,
+                                            rec=Cdrfile,
                                             tpl=list_to_integer(binary_to_list(A4))
                                         },S1),
                                     S3=dict:store({pid,Pid},Jid,S2),
@@ -458,8 +459,8 @@ complete_job(Jid,Data,State) ->
                     end,
                     lager:info("complete ~p ~p ~p ~p cont ~s ~n",[Myres,Job,Nexttry,Gtry,Cont]),
                     R0a=equery(
-                        "insert into job_log(job_id,number_id,result,duration,ivrres) values($1,$2,$3,$4*'1 sec'::interval,$5) returning id",
-                        [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end,field1(ivrres,Data,null)]
+                        "insert into job_log(job_id,number_id,result,duration,ivrres,recfile) values($1,$2,$3,$4*'1 sec'::interval,$5,$6) returning id",
+                        [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end,field1(ivrres,Data,null),Job#job.rec]
                     ),
                     %lager:info("R0: ~p~n",[R0a]),
                     {ok, _, _, [{LogId}]} = R0a,
