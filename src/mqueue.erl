@@ -7,10 +7,10 @@
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
-	 terminate/2, code_change/3]).
+	 terminate/2, code_change/3,calc_dstatus/2]).
 
 -export([authenticate/1,ping/1]).
--export([squery/1,get_channel/2]).
+-export([squery/1,get_channel/3]).
 
 -define(SERVER, ?MODULE). 
 
@@ -71,6 +71,18 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+calc_dstatus([],Res) ->
+    Res;
+
+calc_dstatus([{Type,_}|Arr],Res) ->
+    NRes=case lists:keyfind(Type,1,Res) of
+        false ->
+            Res++[{Type,1}];
+        {TElm,VElm} ->
+            lists:keyreplace(TElm,1,Res,{TElm,VElm+1})
+    end,
+    calc_dstatus(Arr,NRes).
+
 handle_call({auth, chapsha1, Username, Domain, Challenge, Hash}, _From, State) ->
     case getpwuser(Username, Domain) of
 	{ok, {_Uid, Pw}} ->
@@ -88,6 +100,22 @@ handle_call({auth, chapsha1, Username, Domain, Challenge, Hash}, _From, State) -
 	    {reply, deny, Cause}
     end;
 
+handle_call({status}, _From, State) ->
+%    Dict=(State#state.dict),
+%    Dict=[ dict:fetch(X,State#state.dict) || X <- dict:fetch_keys(State#state.dict)],
+    Dict=[ dict:fetch(X,State#state.dict) || X <- lists:filter(fun(A) -> case A of {job,_} -> true; _ -> false end end,dict:fetch_keys(State#state.dict)) ],
+    Dict1=[ { X#job.chid, X#job.jid, X#job.nid } || X <- Dict ],
+    Lock=dict:fetch_keys(State#state.lock),
+    {reply, {Lock, Dict1}, State};
+
+handle_call({dstatus}, _From, State) ->
+    R=calc_dstatus(dict:fetch_keys(State#state.dict),[]),
+    {reply, R, State};
+
+handle_call({rstatus}, _From, State) ->
+    State#state.dict,
+    lager:info("RawStatus: ~p",[ lager:pr(State,?MODULE) ]),
+    {reply, State, State};
 
 handle_call(_Request, _From, State) ->
     Reply = unknown_request,
@@ -116,15 +144,25 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-get_channel(Num,Dict) ->
-    Res=equery( "SELECT m.id,prio,modem_id,interface from route r left join group_members m on m.group_id=r.group_id where $1 like pattern||'%' order by prio desc;", [ Num ] ),
+
+runJob (Jid,Arg) ->
+    lager:info("Job ~p work ~p~n",[self(),[Jid,Arg]]),
+    {ext,Ext}=lists:keyfind(ext,1,Arg),
+    {modemid,MID}=lists:keyfind(modemid,1,Arg),
+    Timeout=case lists:keyfind(timeout,1,Arg) of {timeout, To} -> To; _ -> 30000 end,
+    CallRes=ami_server:originate(Jid,MID,Ext,Timeout,Arg),
+    lager:info("Job ~p res ~p",[Jid,CallRes]),
+    CallRes.
+
+get_channel(Num,Dict,normal) ->
+    Res=equery( "SELECT m.id,prio,modem_id,interface from route r left join group_members m on m.group_id=r.group_id where $1 like pattern||'%' and enabled order by prio desc;", [ Num ] ),
     case Res of
         {ok,_,[]} ->
             {-1, undef, undef, Dict};
         {ok,_,M} when is_list(M) ->
             [{_,Pri,_,_}|_]=M,
             L2=lists:filter(fun({_,NPrio,_,_}) -> NPrio==Pri end, M),
-            lager:info("~p~n",[L2]),
+            %lager:info("~p~n",[L2]),
             Fx=fun({NID,_,NChan,NInt},{_OID,OChan, _OInt, Dict0} = Acc) -> 
 %                    io:format("~p ~p~n",[{NPrio,NChan,NInt},{OChan, OInt}]),
                     case OChan of
@@ -139,60 +177,158 @@ get_channel(Num,Dict) ->
                             Acc
                     end
             end,
-            lists:foldl(Fx,{undef,undef,undef,Dict},L2)
+            Res1=lists:foldl(Fx,{undef,undef,undef,Dict},L2),
+%            lager:info("Res: ~p",[dict:to_list(Res1)]),
+            %{_,_,_,TD} = Res1,
+            %lager:info("Res: ~p",[dict:to_list(TD)]),
+            Res1
+    end;
+get_channel(Num,Dict,dos) ->
+    Res=equery( "SELECT id, dosprio, modem_id,interface from group_members m where usefordos= $1 order by dosprio desc;", [ true ] ),
+    case Res of
+        {ok,_,[]} ->
+            {-1, undef, undef, Dict};
+        {ok,_,M} when is_list(M) ->
+            Fx=fun({NID,_,NChan,NInt},{_OID,OChan, _OInt, Dict0} = Acc) -> 
+                    case OChan of
+                        undef ->
+                            case dict:is_key(NID,Dict) of
+                                true ->
+                                    Acc;
+                                false ->
+                                    {NID,NChan,binary_to_list(NInt), dict:store(NID,Num,Dict0)}
+                            end;
+                        _ -> 
+                            Acc
+                    end
+            end,
+            Res1=lists:foldl(Fx,{undef,undef,undef,Dict},M),
+            case Res of
+                {undef,undef,undef,_} ->
+                    Res2=get_channel(Num,Dict,normal),
+                    %lager:info("Res2: ~p",[Res2]),
+                    Res2;
+                _ ->
+                    %lager:info("Res1: ~p",[Res1]),
+                    Res1
+            end
     end.
 
 
 
 try_run_job(PArg,State) ->
     case PArg of 
-        {A1,A2,A3,A4,A5} ->
+        {A1,A2,A3,A4,A5,A6} ->
             Jid=list_to_integer(binary_to_list(A1)),
+            Maxlines=list_to_integer(binary_to_list(A6)),
             Num=binary_to_list(A3),
-            case dict:find({job,Jid},State#state.dict) of
-                {ok, _Job} ->
-                    {already_running,State};
-                error ->
-                    {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock),
-                    case NChan of
-                        undef ->
-                            {everything_busy, State};
-                        _ ->
-                            Nid=list_to_integer(binary_to_list(A2)),
-                            Tgt=binary_to_list(A5),
+            Nid=list_to_integer(binary_to_list(A2)),
+            case Maxlines of 
+                1 ->
+                    case dict:find({job,Jid},State#state.dict) of
+                        {ok, _Job} ->
+                            {already_running,State};
+                        error ->
+                            {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock, normal),
+                            case NChan of
+                                undef ->
+                                    {everything_busy, State};
+                                _ ->
+                                    Tgt=binary_to_list(A5),
 
-                            {Tex, Tco } = case string:tokens(Tgt,"@") of
-                                [ X ] ->
-                                    { X, "advert" };
-                                [ X , Y ] ->
-                                    { X, Y };
-                                _ ->
-                                    { "000", "advert" }
-                            end,
-                            Cdrfile=io_lib:format("~w-~w",[Jid,timer:now_diff(now(), {0,0,0}) div 1000000]),
-                            Arg=[{ext,Num},{grp,NChan},{modemid,NID},{timeout,60000},{target,Tex},{context,Tco},{channel,NInt},
-                                {cdrfile,Cdrfile}],
-                            case calljob:run(Jid,Arg) of 
-                                {ok, Pid} ->
-                                    meteor:json("push",[{"dtype","job_run"},{"did",Jid},{"nid",Nid},{"number",Num}]),
-                                    S1=State#state.dict,
-                                    S2=dict:store({job,Jid},#job{
-                                            pid=Pid,
-                                            jid=Jid,
-                                            nid=Nid,
-                                            data=Arg,
-                                            chid=NID,
-                                            rec=Cdrfile,
-                                            tpl=list_to_integer(binary_to_list(A4))
-                                        },S1),
-                                    S3=dict:store({pid,Pid},Jid,S2),
-                                    {ok,State#state{dict=S3,lock=NLock}};
-                                _ ->
-                                    {cant_run,State}
+                                    {Tex, Tco } = case string:tokens(Tgt,"@") of
+                                        [ X ] ->
+                                            { X, "advert" };
+                                        [ X , Y ] ->
+                                            { X, Y };
+                                        _ ->
+                                            { "000", "advert" }
+                                    end,
+                                    Cdrfile=io_lib:format("~w-~w",[Jid,timer:now_diff(now(), {0,0,0}) div 1000000]),
+                                    Arg=[{ext,Num},{grp,NChan},{modemid,NID},{timeout,60000*7},{target,Tex},{context,Tco},{channel,NInt},
+                                        {cdrfile,Cdrfile}],
+                                    case runJob(Jid,Arg) of 
+                                        {ok, Pid} ->
+                                            meteor:json("push",[{"dtype","job_run"},{"did",Jid},{"nid",Nid},{"number",Num}]),
+                                            S1=State#state.dict,
+                                            S2=dict:store({job,Jid},#job{
+                                                    pid=Pid,
+                                                    jid=Jid,
+                                                    nid=Nid,
+                                                    data=Arg,
+                                                    chid=NID,
+                                                    rec=Cdrfile,
+                                                    tpl=list_to_integer(binary_to_list(A4))
+                                                },S1),
+                                            S3=S2,
+                                         %   S3=dict:store({pid,Pid},Jid,S2),
+                                            {ok,State#state{dict=S3,lock=NLock}};
+                                        _ ->
+                                            {cant_run,State}
+                                    end
                             end
-                    end
-            end;
-        _ -> 
+                end;
+            _ ->
+                case dict:find({job,{Jid, Nid}},State#state.dict) of
+                    {ok, _Job} ->
+                        {already_running,State};
+                    error ->
+                        NumJob= case dict:find({njob,Jid},State#state.dict) of
+                            {ok, Jnum} ->
+                                Jnum;
+                            _ ->
+                                0
+                        end,
+                        case NumJob<Maxlines of
+                            true ->
+                                {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock, dos),
+                                case NChan of
+                                    undef ->
+                                        {everything_busy, State};
+                                    _ ->
+                                        Tgt=binary_to_list(A5),
+
+                                        {Tex, Tco } = case string:tokens(Tgt,"@") of
+                                            [ X ] ->
+                                                { X, "advert" };
+                                            [ X , Y ] ->
+                                                { X, Y };
+                                            _ ->
+                                                { "000", "advert" }
+                                        end,
+                                        Cdrfile=io_lib:format("~w-~w",[Jid,timer:now_diff(now(), {0,0,0}) div 1000000]),
+                                        Arg=[{ext,Num},{grp,NChan},{modemid,NID},{timeout,60000*7},{target,Tex},{context,Tco},{channel,NInt},
+                                            {cdrfile,Cdrfile}],
+                                        case runJob ({Jid,Nid},Arg) of 
+                                            {ok, Pid} ->
+                                                meteor:json("push",[{"dtype","job_run"},{"did",Jid},{"nid",Nid},{"number",Num}]),
+                                                S1=State#state.dict,
+                                                S2=dict:store({job,{Jid,Nid}},#job{
+                                                        pid=Pid,
+                                                        jid=Jid,
+                                                        nid=Nid,
+                                                        data=Arg,
+                                                        chid=NID,
+                                                        rec=Cdrfile,
+                                                        tpl=list_to_integer(binary_to_list(A4))
+                                                    },S1),
+%                                                S3=dict:store({pid,Pid},{Jid,Nid},S2),
+                                                S3=S2,
+                                                S4=dict:store({njob,Jid},NumJob+1,S3),
+
+                                                {ok,State#state{dict=S4,lock=NLock}};
+                                            _ ->
+                                                {cant_run,State}
+                                        end
+                                end;
+
+
+                            _ ->
+                                {already_running,State}
+                        end
+                end
+        end;
+    _ -> 
             {badarg, State}
     end.
 
@@ -201,21 +337,22 @@ iter_jobs([],State) ->
    State; 
 
 iter_jobs([R|X],State) ->
-    {Jid,Nid,Num,_Tpl,Tgt}=R,
-    lager:info("Call job ~p, number ~p: ~p to ~p ~n",[Jid,Nid,Num,Tgt]),
+    %{Jid,Nid,Num,_Tpl,Tgt,MaxLines}=R,
+    %lager:info("Call job ~p, number ~p: ~p to ~p  (max ~p) ~n",[Jid,Nid,Num,Tgt,MaxLines]),
     {_,St1}=try_run_job(R,State),
     iter_jobs(X,St1).
 
 handle_info(queue_run, State) ->
-    %lager:info("Queue run~n",[]),
-    L=["SELECT j.id, jn.id,jn.number,t.id,t.exten ",
+    lager:debug("Queue run",[]),
+    %L=[SELECT j.id, jn.id,jn.number,t.id,t.exten, case when dos=true then dos_lines else 1 end as maxlines ",
+    L=["SELECT j.id, jn.id,jn.number,t.id,t.exten, case when dos=true then dos_lines else 1 end as maxlines ",
         "from job j inner join job_numbers jn on jn.job_id=j.id ",
         "inner join template t on t.id=j.template_id where ",
         "now()::time between allowed_times and allowed_timee and ",
         "jn.active=true and  (j.next_try is null or j.next_try <now()) and ",
-        "(jn.next_try is null or jn.next_try <now()) and j.active=true order by jn.last_attempt asc;"],
+        "(jn.next_try is null or jn.next_try <now()) and j.active=true order by jn.last_attempt asc nulls first;"],
 
-    lager:info("SQL: ~p",[lists:flatten(L)]),
+    %lager:info("SQL: ~p",[lists:flatten(L)]),
     case squery(lists:flatten(L)) of
         {ok, _X, Res} ->
 %            lager:info("Call job ~p ~n",[Res]),
@@ -224,48 +361,23 @@ handle_info(queue_run, State) ->
                     erlang:send_after(10000, self(), queue_run),
                     {noreply, State};
                 [_|_] ->
-                    erlang:send_after(30000, self(), queue_run),
-                    {noreply, iter_jobs(Res,State)}
+                    erlang:send_after(5000, self(), queue_run),
+                    J=iter_jobs(Res,State),
+                    %lager:info("Prestate ~p",[State#state.dict]),
+                    %lager:info("Afterstate ~p",[J#state.dict]),
+                    {noreply, J}
             end;
         {error, Er} ->
             lager:error("Call job error: ~p",[Er]),
             {noreply, State}
     end;
 
-handle_info({ch_sta,Pid,Info}, State) ->
-    D1=State#state.dict,
-    case dict:is_key({pid,Pid},D1) of
-        true ->
-            Jid=dict:fetch({pid,Pid},D1),
-            Job=dict:fetch({job,Jid},D1),
-
-            lager:info("Calljob process ~p (~p) Stat ~p~n",[Pid,Job,Info]),
-            D2=dict:erase({pid, Pid}, D1),
-            D3=dict:erase({job, Jid}, D2),
-
-            {noreply, State#state{dict=D3}};
-        false ->
-            lager:info("sta unknown process ~p ~n",[Pid]),
-            {noreply, State}
-    end;
-handle_info({'EXIT',Pid,_}, State) ->
-    D1=State#state.dict,
-    case dict:is_key({pid,Pid},D1) of
-        true ->
-            Jid=dict:fetch({pid,Pid},D1),
-            Job=dict:fetch({job,Jid},D1),
-            lager:info("Calljob process ~p dead (~p)~n",[Pid,Job]),
-            D2=dict:erase({pid, Pid}, D1),
-            D3=dict:erase({job, Jid}, D2),
-            L2=dict:erase(Job#job.chid, State#state.lock),
-            {noreply, State#state{dict=D3,lock=L2}};
-        false ->
-            lager:info("Dead unknown process ~p ~n",[Pid]),
-            {noreply, State}
-    end;
-
 handle_info({job_complete, Jid, Job}, State) ->
     lager:info("Job complete ~p ~n",[Job]),
+    {noreply, complete_job(Jid,Job,State)};
+
+handle_info({job_error, Jid, Job}, State) ->
+    lager:info("Job complete ~p with error ~n",[Job]),
     {noreply, complete_job(Jid,Job,State)};
 
 handle_info(Info, State) ->
@@ -418,6 +530,7 @@ field1(Field,Arg,False) ->
         _ -> 
             False
     end.
+
 lookup_tpl_act(Tpl,Res,IvrRes) ->
     TO=equery("SELECT continue,extract(epoch from npause),extract(epoch from pause),info,warning,result_id from template_actions where template_id=$1 and result_id="++
         "(SELECT id from call_result where result=$2 and (ivrres=$3 or ivrres is null) order by ivrres limit 1);",
@@ -432,126 +545,155 @@ lookup_tpl_act(Tpl,Res,IvrRes) ->
     end.
 
 complete_job(Jid,Data,State) ->
-    lager:info("complete_job ~p ~n~p~n",[Jid,Data]),
+    lager:info("complete_job ~p~n~p~n",[Jid,Data]),
+    lager:info("State ~p",[State#state.dict]),
     case dict:find({job,Jid},State#state.dict) of
-                {ok, Job} ->
-                    {Myres,Nexttry,Gtry,Cont,Info,Warn}=case {
-                            field1(status,Data,none),
-                            field1(res_txt,Data,none),
-                            field1(res_num,Data,none)
-                        } of
-                        {hup, "Success", "4"} ->
-                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Success",field1(ivrres,Data,null)),
-                            {"Success", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
-                        {timeout, _, _ } ->
-                            {"Timeout", 60, false};
-                        {res, "Failure", "5" } ->
-                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Busy",null),
-                            {"Busy", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
-                        {res, "Failure", "3" } ->
-                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"NotAnswer",null),
-                            {"NotAnswer", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
-                        {res, "Failure", "8" } ->
-                            {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Congestion",null),
-                            {"Congestion", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
-                        _ ->
-                            {"Unknown",null,0}
+        {ok, Job} ->
+            XJid=case Jid of 
+                { X1Jid, _XNid } -> X1Jid;
+                _ -> Jid
+            end,
+            lager:info("Jid ~p template ~p",[Jid,Job#job.tpl]),
+
+            {Myres,Nexttry,Gtry,Cont,Info,Warn}=case {
+                    field1(status,Data,none),
+                    field1(res_txt,Data,none),
+                    field1(res_num,Data,none)
+                } of
+                {hup, "Success", "4"} ->
+                    F1=case field1(ivrres,Data,null) of
+                        null -> "x";
+                        NotNull -> NotNull
                     end,
-                    lager:info("complete ~p ~p ~p ~p cont ~s ~n",[Myres,Job,Nexttry,Gtry,Cont]),
-                    R0a=equery(
-                        "insert into job_log(job_id,number_id,result,duration,ivrres,recfile) values($1,$2,$3,$4*'1 sec'::interval,$5,$6) returning id",
-                        [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end,field1(ivrres,Data,null),Job#job.rec]
-                    ),
-                    %lager:info("R0: ~p~n",[R0a]),
-                    {ok, _, _, [{LogId}]} = R0a,
+                    {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Success",F1),
+                    {"Success", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
+                {timeout, _, _ } ->
+                    {"Timeout", 60, false};
+                {res, "Failure", "5" } ->
+                    {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Busy",null),
+                    {"Busy", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
+                {res, "Failure", "3" } ->
+                    {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"NotAnswer",null),
+                    {"NotAnswer", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
+                {res, "Failure", "8" } ->
+                    {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Congestion",null),
+                    {"Congestion", ZNPause, ZPause, ZCont, ZInfo, ZWarn};
+                _ ->
+                    {ZCont,ZNPause,ZPause,ZInfo,ZWarn}=lookup_tpl_act(Job#job.tpl,"Congestion",null),
+                    {"Unknown", ZNPause, ZPause, ZCont, ZInfo, ZWarn}
+            end,
+            lager:info("complete ~p ~p ~p ~p cont ~s ~n",
+                [Myres,lager:pr(Job,?MODULE),Nexttry,Gtry,Cont]),
+            R0a=equery( "insert into job_log(job_id,number_id,result,duration,ivrres,recfile,modem_id) values($1,$2,$3,$4*'1 sec'::interval,$5,$6,$7) returning id",
+                [ Job#job.jid, Job#job.nid, Myres, case field1(duration,Data,null) of undef -> null; S -> S end,field1(ivrres,Data,null),Job#job.rec,field1(modemid,Data,null)]
+            ),
+            lager:info("R0: ~p~n",[R0a]),
+            {ok, _, _, [{LogId}]} = R0a,
 
-                    QFields=["job_log.id", "job_log.job_id", "job_log.number_id", "job_log.t", "job_log.result", "job_log.duration", "job.description", "job_numbers.number"],
-                    QFields1=lists:flatten([ X ++ " as \"" ++ X ++ "\"," || X <- QFields]),
-                    QFields2=lists:sublist(QFields1,length(QFields1)-1),
+            QFields=["job_log.id", "job_log.job_id", "job_log.number_id", "job_log.t", "job_log.result", "job_log.duration", "job.description", "job_numbers.number"],
+            QFields1=lists:flatten([ X ++ " as \"" ++ X ++ "\"," || X <- QFields]),
+            QFields2=lists:sublist(QFields1,length(QFields1)-1),
 
-                    R0b=equery(
-                        "select "++QFields2++
-                        " from job_log left join job on job.id=job_log.job_id "++
-                        "left join job_numbers on job_numbers.id=job_log.number_id where job_log.id=$1" ,
-                        [ LogId]
-                    ),
-                    %lager:info("R0: ~p~n",[R0b]),
-                    {ok, C0, [V0]} = R0b,
-                    T0=[{"dtype","job_log"}|mergedb(C0,tuple_to_list(V0))],
-                    meteor:json("push",T0),
+            R0b=equery(
+                "select "++QFields2++
+                " from job_log left join job on job.id=job_log.job_id "++
+                "left join job_numbers on job_numbers.id=job_log.number_id where job_log.id=$1" ,
+                [ LogId]
+            ),
+            %lager:info("R0: ~p~n",[R0b]),
+            {ok, C0, [V0]} = R0b,
+            T0=[{"dtype","job_log"}|mergedb(C0,tuple_to_list(V0))],
+            meteor:json("push",T0),
 
-                    lager:info("update num Jid#~p=~p, Nid#~p=~p",[ Job#job.jid, Gtry, Job#job.nid, Nexttry  ]),
-                    equery( 
-                        "update job_numbers set last_attempt=now(), last_result=$1, next_try=now()+$4*'1 sec'::interval where job_id=$2 and id=$3",
-                        [ Myres, Job#job.jid, Job#job.nid, Nexttry ]),
+            lager:info("update num Jid#~p=~p, Nid#~p=~p",[ Job#job.jid, Gtry, Job#job.nid, Nexttry  ]),
+            equery( 
+                "update job_numbers set last_attempt=now(), last_result=$1, next_try=now()+$4*'1 sec'::interval where job_id=$2 and id=$3",
+                [ Myres, Job#job.jid, Job#job.nid, Nexttry ]),
 
-                    Q1=lists:flatten(["select id,number,last_attempt,last_result,active,next_try",
-                            " from job_numbers where id=", integer_to_list(Job#job.nid), ";"]),
-                    R1=squery(Q1),
-                    {ok, C1, [V1]} = R1,
-                    lager:info("serialize ~p~n~p~n",[C1,V1]),
-                    T1=[{"dtype","job_number"},{"did",Jid}|mergedb(C1,tuple_to_list(V1))],
-                    meteor:json("push",T1),
+            Q1=lists:flatten(["select id,number,last_attempt,last_result,active,next_try",
+                    " from job_numbers where id=", integer_to_list(Job#job.nid), ";"]),
+            R1=squery(Q1),
+            {ok, C1, [V1]} = R1,
+            lager:info("serialize ~p~n~p~n",[C1,V1]),
+            T1=[{"dtype","job_number"},{"did",XJid}|mergedb(C1,tuple_to_list(V1))],
+            meteor:json("push",T1),
 
 
-                    case is_integer(Gtry) of 
-                        true -> 
+            case is_integer(Gtry) of 
+                true -> 
+                    case Gtry > 0 of
+                        true ->
                             M=equery( 
                                 "update job set next_try=now()+$1*'1 sec'::interval, active=active and $3 where id=$2",
                                 [ Gtry, Job#job.jid, Cont ]),
                             Q2=lists:flatten(["select id,description,allowed_times,",
                                     "allowed_timee, interval_success, interval_busy,",
                                     "interval_na, next_try, target, active ",
-                                    " from job where id=", integer_to_list(Jid), ";"]),
+                                    " from job where id=", integer_to_list(XJid), ";"]),
                             R2=squery(Q2),
                             {ok, C2, [V2]} = R2,
-                            lager:info("serialize ~p~n~p~n",[C2,V2]),
-                            T2=[{"dtype","job"},{"did",Jid}|mergedb(C2,tuple_to_list(V2))],
+                            %lager:info("serialize ~p~n~p~n",[C2,V2]),
+                            T2=[{"dtype","job"},{"did",XJid}|mergedb(C2,tuple_to_list(V2))],
                             meteor:json("push",T2),
                             M;
                         _ -> ok
-                    end,
-                    meteor:json("push",[{"dtype","job_end"},{"did",Jid},{"nid",Job#job.nid},{"res",Myres}]),
-
-                    case Warn or Info of
-                        true ->
-                            R3=equery(
-                                "insert into notification(job_id,number_id,result,ivrres,warning) values($1,$2,$3,$4,$5) returning id",
-                                [ Job#job.jid, Job#job.nid, Myres, field1(ivrres,Data,null), Warn]
-                            ),
-                            {ok, _, _, [{NotId}]} = R3,
-
-
-                            Q1Fields=["notification.id", "notification.job_id", "notification.number_id", "notification.t", "notification.result", "job.description", "job_numbers.number", "notification.warning", "notification.ivrres"],
-                            Q1Fields1=lists:flatten([ X ++ " as \"" ++ X ++ "\"," || X <- Q1Fields]),
-                            Q1Fields2=lists:sublist(Q1Fields1,length(Q1Fields1)-1),
-
-                            R3b=equery(
-                                "select "++Q1Fields2++
-                                " from notification left join job on job.id=notification.job_id "++
-                                "left join job_numbers on job_numbers.id=notification.number_id where notification.id=$1" ,
-                                [ NotId]
-                            ),
-
-                            %R3b=equery( "select * from notification where id=$1", [ NotId]),
-                            lager:info("R0: ~p~n",[R3b]),
-                            {ok, C3, [V3]} = R3b,
-                            T3=[{"dtype","notification"}|mergedb(C3,tuple_to_list(V3))],
-                            meteor:json("push",T3),
-                            ok;
-                        _ ->
-                            ok
-                    end,
-
-                    %lager:info("R0: ~p~n",[R0a]),
-                    {ok, _, _, [{LogId}]} = R0a,
+                    end;
+                _ -> ok
+            end,
+            meteor:json("push",[{"dtype","job_end"},{"did",XJid},{"nid",Job#job.nid},{"res",Myres}]),
+                case Warn or Info of
+                    true ->
+                        R3=equery(
+                            "insert into notification(job_id,number_id,result,ivrres,warning) values($1,$2,$3,$4,$5) returning id",
+                            [ Job#job.jid, Job#job.nid, Myres, field1(ivrres,Data,null), Warn]
+                        ),
+                        {ok, _, _, [{NotId}]} = R3,
 
 
-                            
-                    State;
-                error ->
-                    State
-    end.
+                        Q1Fields=["notification.id", "notification.job_id", "notification.number_id", "notification.t", "notification.result", "job.description", "job_numbers.number", "notification.warning", "notification.ivrres"],
+                        Q1Fields1=lists:flatten([ X ++ " as \"" ++ X ++ "\"," || X <- Q1Fields]),
+                        Q1Fields2=lists:sublist(Q1Fields1,length(Q1Fields1)-1),
+
+                        R3b=equery(
+                            "select "++Q1Fields2++
+                            " from notification left join job on job.id=notification.job_id "++
+                            "left join job_numbers on job_numbers.id=notification.number_id where notification.id=$1" ,
+                            [ NotId]
+                        ),
+
+                        %R3b=equery( "select * from notification where id=$1", [ NotId]),
+                        lager:info("R0: ~p~n",[R3b]),
+                        {ok, C3, [V3]} = R3b,
+                        T3=[{"dtype","notification"}|mergedb(C3,tuple_to_list(V3))],
+                        meteor:json("push",T3),
+                        ok;
+                    _ ->
+                        ok
+                end,
+
+                %lager:info("R0: ~p~n",[R0a]),
+                %                {ok, _, _, [{LogId}]} = R0a,
+
+                D1=dict:erase({job, Jid}, State#state.dict),
+                D2=case Jid of 
+                    {_, _} ->
+                        case dict:find({njob,XJid},D1) of
+                            {ok, Jnum} ->
+                                dict:store({njob,XJid},Jnum-1,D1);
+                            _ ->
+                                D1
+                        end;
+                    _ ->
+                        D1
+                end,
+                L2=dict:erase(Job#job.chid, State#state.lock),
+                erlang:send_after(100, self(), queue_run),
+                State#state{dict=D2,lock=L2};
+            error ->
+                State;
+            _ ->
+                State
+        end.
 
 equery(Sql, Args) ->
     poolboy:transaction(auth_db_worker, fun(Worker) ->

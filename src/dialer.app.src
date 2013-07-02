@@ -11,19 +11,18 @@
   %%
   {mod, {dialer_app, []}},
   {env, [
-      {db_host,"192.168.2.15"},
-      {db_name,"caller"},
+      {db_host,"localhost"},
+      {db_name,"dialer"},
       {db_user,"pgsql"},
       {db_pass,""},
-      {meteor_host,"127.0.0.1"},
+      {meteor_host,"localhost"},
       {meteor_port,4671},
       %{ami_host, emulator},
       {ami_emulator, {0.1, 0.3, 0.5}},
-      {ami_host, "192.168.252.1"},
+      {ami_host, "localhost"},
       {ami_port, 6038}, 
-      {ami_username, "viruzzz"},
+      {ami_username, "dialer"},
       {ami_secret, "takida"},
-      %{ami_call_channel,"IAX2/xhome/~s~s"},
       {ami_call_channel,"SIP/g101/~s~s"},
       {ami_template, [ 
           {"Action","Originate"},
@@ -32,7 +31,7 @@
           {"Exten",target},
           {"Priority","1"},
           {"Callerid","123000"},
-          {"Timeout","20000"},
+          {"Timeout","60000"},
           {"ActionID",chan},
           {"Account",chan},
           {"Async","1"}

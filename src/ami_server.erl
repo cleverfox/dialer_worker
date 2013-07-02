@@ -11,7 +11,7 @@
 
 -compile([{parse_transform, lager_transform}]).
 %% API
--export([start_link/4,originate/5]).
+-export([start_link/4,originate/5,status/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -27,7 +27,12 @@
 %%%===================================================================
 
 originate(UID,MID,Ext,Timeout,Args) -> 
-    gen_server:call(?MODULE, {originate,UID,MID,Ext,Timeout,Args}, 600000).
+    gen_server:cast(?MODULE,
+        {self(),{originate,UID,MID,Ext,Timeout,Args}}),
+    {ok, 0}.
+
+status() -> 
+    gen_server:call(?MODULE, {status}, 600).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -41,7 +46,7 @@ start_link(Host,Port,Username,Secret) ->
         [Host,Port,Username,Secret], []).
 
 %%%===================================================================
-%%% gen_server callbacks
+%%% GEN_Server callbacks
 %%%===================================================================
 
 %%--------------------------------------------------------------------
@@ -83,12 +88,32 @@ init([Host, Port, Username, Secret]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+
+handle_call({status}, _From, State) ->
+    ModemSt=[ {X#job.modemid, X#job.ext, X#job.state} || X <- State#state.job ],
+    lager:notice("Cast Status: ~p",[ModemSt]),
+    {reply,ModemSt,State};
+
+
+handle_call(_Request, _From, State) ->
+    Reply = unknown_request,
+    {reply, Reply, State}.
+
+%%--------------------------------------------------------------------
+%% @private
+%% @doc
+%% Handling cast messages
+%%
+%% @spec handle_cast(Msg, State) -> {noreply, State} |
+%%                                  {noreply, State, Timeout} |
+%%                                  {stop, Reason, State}
+%% @end
+%%--------------------------------------------------------------------
 rnd(Prob) ->
     [Rnd|_]=binary_to_list(crypto:rand_bytes(1)),
     Rnd/256 < Prob.
         
-handle_call({originate,UID,MID,Ext,Timeout,Args}, From, 
-    #state{ job = Job, cntr=Cnt} = State) ->
+handle_cast({From, {originate, UID, MID, Ext, Timeout, Args}}, #state{ job = Job, cntr=Cnt} = State) ->
     Channel=case lists:keyfind(channel,1,Args) of
         {channel, CustChan} ->
             lists:flatten(io_lib:format(CustChan,[Ext]));
@@ -169,38 +194,11 @@ handle_call({originate,UID,MID,Ext,Timeout,Args}, From,
             {reply, Reply, State};
         _ ->
             sendData(State,Request),
-            %sendData(State,[
-            %        {"Action","Originate"},
-            %        %{"Channel","SIP/g102/"++Chan++Ext},
-            %        {"Channel","IAX2/xhome/"++Ext},
-            %        {"Context", "advert"},
-            %        {"Exten","1"},
-            %        {"Priority","1"},
-            %        {"Callerid","123000"},
-            %        {"Timeout","20000"},
-            %        {"ActionID",Chan},
-            %        {"Account",Chan},
-            %        {"Async","1"}
-            %    ]),
             Job1=lists:append(Job,[#job{uid=UID,modemid=MID,from=From,ext=Ext,state=init,callnum=Cnt,ivrres=null}]),
             erlang:send_after(Timeout, self(), {handletimeout, Cnt}),
-            {noreply, State#state{job=Job1,cntr=Cnt+1}, 1200000}
+            {noreply, State#state{job=Job1,cntr=Cnt+1}}
     end;
 
-handle_call(_Request, _From, State) ->
-    Reply = unknown_request,
-    {reply, Reply, State}.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%%
-%% @spec handle_cast(Msg, State) -> {noreply, State} |
-%%                                  {noreply, State, Timeout} |
-%%                                  {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
 handle_cast(_Msg, State) ->
         {noreply, State}.
 
@@ -256,8 +254,8 @@ handle_info({tcp, Socket, Data}, #state{ state=CS, buffer=Buf } = State) ->
             NS=case Data of 
                 "\r\n" -> 
                     S2=handle_data(State,Buf),
-                    lager:info("~p~n~n",[S2#state.job]),
-                    %io:format("State update ~p~n",[S2]),
+                    %lager:info("~p~n~n",[S2#state.job]),
+                    %lager:info("State update ~p",[S2]),
                     S2#state{buffer=undefined};
                 Any ->
                     {ok, C1, C2} = splitandtrim(Any),
@@ -273,6 +271,28 @@ handle_info({tcp, Socket, Data}, #state{ state=CS, buffer=Buf } = State) ->
             {noreply, NS}
     end;
 
+handle_info({hanguptimeout, UID},State) ->
+    JSta=lists:keyfind(UID,#job.uniqid,State#state.job),
+    lager:notice("Timeout Hangup uid: ~p ~p",[UID,JSta]),
+    case JSta of
+        false ->
+            {noreply, State};
+        X ->
+            lager:notice("Timeout Hangup ~p ~p uid: ~p, sta: ~p",[JSta#job.uid,JSta#job.modemid,UID,JSta]),
+            NJob=lists:filter(fun(A) -> A#job.modemid =/= JSta#job.modemid end, State#state.job),
+            make_reply(none,X),
+            lager:notice("reply for strange call timeout ~p",[lager:pr(X, ?MODULE)]),
+            
+            {noreply, State#state{job=NJob}}
+    end;
+
+
+%handle_info({showstate},State) ->
+%    ModemSt=[ {X#job.modemid, X#job.ext} || X <- State#state.job ],
+%    lager:notice("Status: ~p",[ModemSt]),
+%    erlang:send_after(5000, self(), {showstate}),
+%    {noreply,State};
+
 handle_info({handletimeout, CallId},State) ->
     JSta=lists:keyfind(CallId,#job.callnum,State#state.job),
     case JSta of
@@ -281,7 +301,7 @@ handle_info({handletimeout, CallId},State) ->
             {noreply, State};
        _  ->
             NSta=JSta#job{state=timeout},
-            lager:info("Timeout on call ~p ~p~n",[CallId,JSta]),
+            lager:info("Timeout on call ~p ~p~n",[JSta#job.uid,JSta#job.modemid,CallId,JSta]),
             make_reply(none,NSta),
             sendData(State,[
                     {"Action","Hangup"},
@@ -409,7 +429,7 @@ join_req(List) ->
                                 ,"\r\n"] end,List)|"\r\n"]).
 
 sendData(#state{socket=Sock}=_State,Array) ->
-    lager:info("Send(~p)~n",[Array]),
+    %lager:info("Send(~p)~n",[Array]),
     Req=join_req(Array),
     ok = gen_tcp:send(Sock, Req).
 
@@ -417,12 +437,45 @@ make_reply(Res,JSta) ->
     Reply=case Res of 
         none ->
             {JSta#job.uid,JSta#job.modemid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
-                undef,JSta#job.ivrres};
+                0,JSta#job.ivrres};
         duration ->
             {JSta#job.uid,JSta#job.modemid,JSta#job.ext,JSta#job.state,JSta#job.res,JSta#job.reason,
                 calendar:datetime_to_gregorian_seconds({date(),time()})-JSta#job.start,JSta#job.ivrres}
     end,    
-    gen_server:reply(JSta#job.from,{ok,Reply}).
+    lager:info("ami_Reply ~p",[Reply]),
+    case Reply of
+        %{_,_,_,res,"Failure","8",_} when ( Try > 0 ) ->
+        %    [Rnd|_]=binary_to_list(crypto:rand_bytes(1)),
+        %    timer:sleep(1000+erlang:round(Rnd/256*9000)),
+        %    work(Jid,Arg,Pid,Try-1);
+        {Jid,MID,Ext,Sta,Txt,Reason,Time,IvrRes} ->
+            %{25,15,"+79102113571",res,"Failure","5",0,null}
+            XJob=[ 
+                {modemid,MID},
+                {ext,Ext},
+                {status,Sta},
+                {res_txt,Txt},
+                {res_num,Reason},
+                {duration,Time},
+                {ivrres,IvrRes}
+            ],
+            lager:info("Job ~p ~p finish ~p",[Jid,self(), {job_complete, Jid, XJob}]),
+            JSta#job.from ! {job_complete, Jid, XJob};
+        _ -> 
+            Jid = JSta#job.uid,
+        %    XJob=[ 
+        %        {modemid,JSta#job.modemid},
+        %        {ext,},
+        %        {status,res},
+        %        {res_txt,"Failure"},
+        %        {res_num,"8"},
+        %        {duration,0}
+        %    ],
+            XJob = [],
+            lager:info("Job ~p ~p failfinish ~p",[Jid,self(), {job_error, Jid, XJob} ]),
+            JSta#job.from ! {job_error, Jid, XJob }
+    end.
+%gen_server:reply(JSta#job.from,{ok,Reply}).
 
 handle_data(State,[Action|Array]) ->
     %io:format("Recvd(~p)~n",[Array]),
@@ -430,8 +483,8 @@ handle_data(State,[Action|Array]) ->
     %    [{_,"Authentication accepted"}] ->
     %        io:format("AMI ready~n");
     %     _ -> 
-    lager:info("Received state ~p message ~p ~n",[State#state.state,Action]),
-    lager:info("Data  ~p ~n",[Array]),
+    %lager:notice("Received message ~p ~n",[Action]),
+    %lager:info("Data  ~p ~n",[Array]),
     case State#state.state of
         auth ->
             case Action of
@@ -441,6 +494,7 @@ handle_data(State,[Action|Array]) ->
                     State 
             end;
         _ ->
+            lager:notice("Asterisk: ~p~n~p",[Action,Array]),
             M=case Action of
                 {"Response","Success"} ->
                     case lists:keyfind("ActionID",1,Array) of
@@ -463,7 +517,7 @@ handle_data(State,[Action|Array]) ->
                 {"Event","OriginateResponse"} ->
                     {"ActionID",ID}=lists:keyfind("ActionID",1,Array),
                     JSta=lists:keyfind(list_to_integer(ID),#job.modemid,State#state.job),
-%                    io:format("List ~p~n Found ~p~n",[State#state.job,JSta]),
+                    io:format("Found ~p~n in list ~p~n",[JSta,State#state.job]),
                     case JSta of
                         false ->
                             undefined;
@@ -473,10 +527,12 @@ handle_data(State,[Action|Array]) ->
                             case Resp of
                                 "Failure" ->
                                     NSta=JSta#job{state=res,res=Resp,reason=Reas},
+                                    lager:notice("Finish failed job ~p ~p",[JSta#job.uid, JSta]),
                                     make_reply(none,NSta),
                                     %gen_server:reply(JSta#job.from,{ok,JSta#job{state=fail,res=Resp,reason=Reas}}),
                                     %JSta#job{state=res,res=Resp,reason=Reas};
-                                    {finish, ID};
+                                    lager:notice("Finish job ~p on modem ~p ",[JSta#job.uid,JSta#job.modemid]),
+                                    {finish, NSta#job.modemid};
                                 "Success" ->
                                     JSta#job{state=progress,res=Resp,reason=Reas,start=calendar:datetime_to_gregorian_seconds({date(),time()})}
                             end
@@ -488,10 +544,12 @@ handle_data(State,[Action|Array]) ->
                         false ->
                             undefined;
                         X ->
+                            lager:notice("Hangup: ~p ~p ~p",[JSta#job.uid,JSta#job.modemid,JSta]),
                             case JSta#job.state of
                                 progress ->
                                     {_,Hup}=lists:keyfind("Cause",1,Array), 
                                     {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
+                                    lager:notice("Hangup progress call ~p ~p (~p ~p) with state ~p",[JSta#job.uid,JSta#job.modemid,Hup,HupTxt,JSta#job.state]),
                                     IvrRes=case lists:keyfind("CallerIDName",1,Array) of
                                         {"CallerIDName","IVRRES"} ->
                                             case lists:keyfind("CallerIDNum",1,Array) of
@@ -504,33 +562,63 @@ handle_data(State,[Action|Array]) ->
                                     end, 
                                     NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt,ivrres=IvrRes},
                                     make_reply(duration,NSta),
+				    lager:notice("reply for normal ~p ~p call ~p",[JSta#job.uid,JSta#job.modemid,lager:pr(NSta, ?MODULE)]),
                                     {finish, NSta#job.modemid};
                                 _ ->
                                     {_,Hup}=lists:keyfind("Cause",1,Array), 
                                     {_,HupTxt}=lists:keyfind("Cause-txt",1,Array), 
-                                    X#job{hup=Hup,huptxt=HupTxt}
+                                    NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt,ivrres=null},
+                                    lager:notice("Hangup call ~p ~p with no OriginateResponse (~p ~p) with state ~p ~p",[JSta#job.uid,JSta#job.modemid,Hup,HupTxt,JSta#job.state,JSta]),
+                                    %case Hup of
+                                    %    "17" -> 
+                                    %        NSta=X#job{res="Failure",reason="5",state=hup,hup=Hup,huptxt=HupTxt,ivrres=null},
+                                    %        make_reply(none,NSta),
+                                    %        lager:notice("reply for strange call ~p",[lager:pr(NSta, ?MODULE)]),
+                                    %        {finish, NSta#job.modemid};
+                                    %    _ ->
+                                    %        NSta=X#job{state=hup,hup=Hup,huptxt=HupTxt,ivrres=null},
+                                    %        make_reply(none,NSta),
+                                    %        lager:notice("reply for strange call ~p",[lager:pr(NSta, ?MODULE)]),
+                                    %        {finish, NSta#job.modemid}
+                                    %end
+				    erlang:send_after(1000, self(), {hanguptimeout,UID}),
+                                    NSta
                             end
                     end;
                 {"Event","NewAccountCode"} -> 
-                    {"AccountCode",ID}=lists:keyfind("AccountCode",1,Array),
-                    JSta=lists:keyfind(list_to_integer(ID),#job.modemid,State#state.job),
-                    {"Channel",EC}=lists:keyfind("Channel",1,Array),
-                    {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
-                    JSta#job{state=queue,uniqid=UID,echan=EC};
+                    case lists:keyfind("AccountCode",1,Array) of
+                        false ->
+                            undefined;
+                        {"AccountCode",[]} ->
+                            undefined;
+                        {"AccountCode",ID} ->
+                            JSta=lists:keyfind(list_to_integer(ID),#job.modemid,State#state.job),
+                            case JSta of
+                                false ->
+                                    undefined;
+                                _ -> 
+                                    {"Channel",EC}=lists:keyfind("Channel",1,Array),
+                                    {"Uniqueid",UID}=lists:keyfind("Uniqueid",1,Array),
+                                    JSta#job{state=queue,uniqid=UID,echan=EC}
+                            end
+                    end;
                 _ -> 
-                    lager:info("Unknown message ~p (~p)~n",[Action,Array]),
+                    lager:notice("Unknown message ~p (~p)~n",[Action,Array]),
                     undefined
             end,
             case M of 
                 undefined -> 
                     State;
                 {finish, JID} ->
-                    J=lists:delete(undef,lists:map(fun(X) -> 
-                                case X#job.modemid== JID of 
-                                    true -> undef;
-                                    _ -> X
-                                end
-                        end, State#state.job)),
+                    %                J=lists:delete(undef,lists:map(fun(X) -> 
+                    %            case X#job.modemid== JID of 
+                    %                true -> undef;
+                    %                _ -> X
+                    %            end
+                    %    end, State#state.job)),
+                    J=lists:filter(fun(X) -> X#job.modemid =/= JID end, State#state.job),
+
+                    lager:notice("Finish job ~p~n ~p -> ~p",[JID,State#state.job,J]),
                     State#state{job=J};
                 _ -> 
                     J=lists:map(fun(X) -> 

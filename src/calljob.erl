@@ -10,13 +10,13 @@ run(Jid,Arg) ->
     {ok,spawn_link(?MODULE,work,[Jid,Arg,self(),6])}.
 
 work(Jid,Arg,Pid,Try) ->
-    lager:info("Job xrun~p~n",[[Jid,Arg,Pid]]),
+    lager:info("Job ~p work ~p~n",[self(),[Jid,Arg]]),
     %{grp,Grp}=lists:keyfind(grp,1,Arg),
     {ext,Ext}=lists:keyfind(ext,1,Arg),
     {modemid,MID}=lists:keyfind(modemid,1,Arg),
     Timeout=case lists:keyfind(timeout,1,Arg) of {timeout, To} -> To; _ -> 30000 end,
     CallRes=ami_server:originate(Jid,MID,Ext,Timeout,Arg),
-    lager:info("Job res ~p",[CallRes]),
+    lager:info("Job ~p res ~p",[self(),CallRes]),
     case CallRes of
         {ok, {_,_,_,res,"Failure","8",_}} when ( Try > 0 ) ->
             [Rnd|_]=binary_to_list(crypto:rand_bytes(1)),
@@ -36,8 +36,15 @@ work(Jid,Arg,Pid,Try) ->
            %    undef -> WJob;
            %    A -> [ WJob | {duration, A } ]
            %end,
+           lager:info("Job ~p ~p finish ~p",[Jid,self(), {job_complete, Jid, XJob}]),
            Pid ! {job_complete, Jid, XJob};
        _ -> 
-           Pid ! {job_error, Jid, unknown}
+           lager:info("Job ~p ~p failfinish ~p",[Jid,self(), {job_error, Jid, []} ]),
+           Pid ! {job_error, Jid, [ 
+                   {status,res},
+                   {res_txt,"Failure"},
+                   {res_num,"8"},
+                   {modemid, MID}
+               ]}
     end.
 

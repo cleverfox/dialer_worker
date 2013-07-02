@@ -11,7 +11,7 @@
 
 -compile([{parse_transform, lager_transform}]).
 %% API
--export([start_link/2,message/2,json/2]).
+-export([start_link/2,message/2,json/2,serialize/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
@@ -25,7 +25,7 @@
 %%%===================================================================
 
 message(Chan,Data) -> 
-%    lager:info("Chan ~p ~s",[Chan,Data]),
+    %lager:info("Chan ~p ~p",[Chan,Data]),
     gen_server:cast(?MODULE, {message,Chan,Data}).
 
 serialize([]) ->
@@ -39,8 +39,15 @@ serialize({Name, Data}) ->
         true ->
             [34,Name,34,": ",integer_to_list(Data)];
         false ->
-            [34,Name,34,": ",34,Data,34]
-    end;
+            case Data of
+                null ->
+                    [34,Name,34,": null "];
+                _ ->
+		    F = fun(X) -> case X of 34 -> "\\\\" ++ [X]; _ -> X end end,
+		    Data1=lists:flatten([ F(X) || X <- Data ]),
+                    [34,Name,34,": ",34,Data1,34]
+            end
+end;
 
 serialize([{Name, Data}]) ->
     serialize({Name, Data});
@@ -50,6 +57,7 @@ serialize([{Name, Data}|X]) ->
     [serialize({Name, Data}),", "|M].
     
 json(Chan,Data) -> 
+    lager:info("Data to send ~p",[Data]),
     Json=lists:flatten(["{",serialize(Data),"}"]),
     message(Chan,Json),
     ok.
@@ -122,7 +130,7 @@ handle_cast({message,Chan,Msg}, State) ->
         false ->
             {noreply, State};
         _ ->
-            Data=io_lib:format("ADDMESSAGE ~s ~s~c~n",[Chan, Msg,13]),
+            Data=io_lib:format("ADDMESSAGE ~s ~s~c~n",[Chan, Msg, 13]),
             %lager:info("Send to meteor ~p",[Data]),
             ok = gen_tcp:send(State#state.socket, Data),
             {noreply, State}
