@@ -10,7 +10,7 @@
 	 terminate/2, code_change/3,calc_dstatus/2]).
 
 -export([authenticate/1,ping/1]).
--export([squery/1,get_channel/3]).
+-export([squery/1,get_channel/4]).
 
 -define(SERVER, ?MODULE). 
 
@@ -131,6 +131,27 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+
+handle_cast({status}, State) ->
+%    Dict=(State#state.dict),
+%    Dict=[ dict:fetch(X,State#state.dict) || X <- dict:fetch_keys(State#state.dict)],
+    Dict=[ dict:fetch(X,State#state.dict) || X <- lists:filter(fun(A) -> case A of {job,_} -> true; _ -> false end end,dict:fetch_keys(State#state.dict)) ],
+    Dict1=[ { X#job.chid, X#job.jid, X#job.nid } || X <- Dict ],
+    Lock=dict:fetch_keys(State#state.lock),
+    lager:info("LStatus: ~p ",[ Lock ]),
+    lager:info("DStatus: ~p ",[ Dict1 ]),
+    {noreply, State};
+
+handle_cast({dstatus}, State) ->
+    R=calc_dstatus(dict:fetch_keys(State#state.dict),[]),
+    lager:info("DStatus: ~p",[ R ]),
+    {noreply, State};
+
+handle_cast({rstatus}, State) ->
+    State#state.dict,
+    lager:info("RawStatus: ~p",[ lager:pr(State,?MODULE) ]),
+    {noreply, State};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -154,8 +175,21 @@ runJob (Jid,Arg) ->
     lager:info("Job ~p res ~p",[Jid,CallRes]),
     CallRes.
 
-get_channel(Num,Dict,normal) ->
-    Res=equery( "SELECT m.id,prio,modem_id,interface from route r left join group_members m on m.group_id=r.group_id where $1 like pattern||'%' and enabled order by prio desc;", [ Num ] ),
+get_channel(Num,Dict,normal,Class) ->
+    %Res=equery( 
+    %    "SELECT m.id,prio,modem_id,interface from route r left join " ++ 
+    %    "group_members m on m.group_id=r.group_id where $1 like pattern||'%'" ++ 
+    %    " and enabled order by prio desc;", [ Num ] ),
+    %Res=equery( "select * from (SELECT m.id,prio,m.modem_id,interface from route r "++
+    %    "inner join group_extra_members e on e.group_id=r.group_id inner join "++
+    %    "group_members m on m.id=e.modem_id where e.class_id=100 and  $1 like "++
+    %    "pattern||'%' and enabled union SELECT m.id,prio,modem_id,interface "++
+    %    "from route r inner join group_members m on m.group_id=r.group_id where "++
+    %    "$2 like pattern||'%' and enabled) un order by prio desc; ", [ Num, Num] ),
+    Res=equery("SELECT m.id,prio,m.modem_id,interface from route r "++
+        "inner join group_extra_members e on e.group_id=r.group_id inner join "++
+        "group_members m on m.id=e.modem_id where e.class_id=$1 and "++
+        "$2 like pattern||'%' and enabled order by prio desc;",[Class,Num]),
     case Res of
         {ok,_,[]} ->
             {-1, undef, undef, Dict};
@@ -183,11 +217,12 @@ get_channel(Num,Dict,normal) ->
             %lager:info("Res: ~p",[dict:to_list(TD)]),
             Res1
     end;
-get_channel(Num,Dict,dos) ->
+get_channel(Num,Dict,dos,Class) ->
     Res=equery( "SELECT id, dosprio, modem_id,interface from group_members m where usefordos= $1 order by dosprio desc;", [ true ] ),
     case Res of
         {ok,_,[]} ->
-            {-1, undef, undef, Dict};
+            %{-1, undef, undef, Dict}; %class fix
+            get_channel(Num,Dict,normal,Class); %class fix
         {ok,_,M} when is_list(M) ->
             Fx=fun({NID,_,NChan,NInt},{_OID,OChan, _OInt, Dict0} = Acc) -> 
                     case OChan of
@@ -205,7 +240,7 @@ get_channel(Num,Dict,dos) ->
             Res1=lists:foldl(Fx,{undef,undef,undef,Dict},M),
             case Res of
                 {undef,undef,undef,_} ->
-                    Res2=get_channel(Num,Dict,normal),
+                    Res2=get_channel(Num,Dict,normal,Class),
                     %lager:info("Res2: ~p",[Res2]),
                     Res2;
                 _ ->
@@ -218,9 +253,10 @@ get_channel(Num,Dict,dos) ->
 
 try_run_job(PArg,State) ->
     case PArg of 
-        {A1,A2,A3,A4,A5,A6} ->
+        {A1,A2,A3,A4,A5,A6,A7} ->
             Jid=list_to_integer(binary_to_list(A1)),
             Maxlines=list_to_integer(binary_to_list(A6)),
+            Class=list_to_integer(binary_to_list(A7)),
             Num=binary_to_list(A3),
             Nid=list_to_integer(binary_to_list(A2)),
             case Maxlines of 
@@ -229,7 +265,7 @@ try_run_job(PArg,State) ->
                         {ok, _Job} ->
                             {already_running,State};
                         error ->
-                            {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock, normal),
+                            {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock, normal, Class),
                             case NChan of
                                 undef ->
                                     {everything_busy, State};
@@ -281,7 +317,7 @@ try_run_job(PArg,State) ->
                         end,
                         case NumJob<Maxlines of
                             true ->
-                                {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock, dos),
+                                {NID,NChan,NInt,NLock}=get_channel(Num,State#state.lock, dos, Class),
                                 case NChan of
                                     undef ->
                                         {everything_busy, State};
@@ -344,27 +380,26 @@ iter_jobs([R|X],State) ->
 
 handle_info(queue_run, State) ->
     lager:debug("Queue run",[]),
-    %L=[SELECT j.id, jn.id,jn.number,t.id,t.exten, case when dos=true then dos_lines else 1 end as maxlines ",
-    L=["SELECT j.id, jn.id,jn.number,t.id,t.exten, case when dos=true then dos_lines else 1 end as maxlines ",
-        "from job j inner join job_numbers jn on jn.job_id=j.id ",
-        "inner join template t on t.id=j.template_id where ",
-        "now()::time between allowed_times and allowed_timee and ",
-        "jn.active=true and  (j.next_try is null or j.next_try <now()) and ",
-        "(jn.next_try is null or jn.next_try <now()) and j.active=true order by jn.last_attempt asc nulls first;"],
+    L="SELECT j.id, jn.id,jn.number,t.id,t.exten, case when dos=true then dos_lines else 1 end as maxlines, class_id " ++
+        "from job j inner join job_numbers jn on jn.job_id=j.id " ++
+        "inner join template t on t.id=j.template_id where " ++
+        "now()::time between allowed_times and allowed_timee and " ++
+        "jn.active=true and  (j.next_try is null or j.next_try <now()) and " ++
+        "(jn.next_try is null or jn.next_try <now()) and j.active=true "++
+        "order by jn.last_attempt asc nulls first;",
 
-    %lager:info("SQL: ~p",[lists:flatten(L)]),
-    case squery(lists:flatten(L)) of
+    case squery(L) of
         {ok, _X, Res} ->
 %            lager:info("Call job ~p ~n",[Res]),
             case Res of
                 [] ->
-                    erlang:send_after(10000, self(), queue_run),
+                    erlang:send_after(30000, self(), queue_run),
                     {noreply, State};
                 [_|_] ->
-                    erlang:send_after(5000, self(), queue_run),
                     J=iter_jobs(Res,State),
                     %lager:info("Prestate ~p",[State#state.dict]),
                     %lager:info("Afterstate ~p",[J#state.dict]),
+                    erlang:send_after(5000, self(), queue_run),
                     {noreply, J}
             end;
         {error, Er} ->
@@ -610,8 +645,9 @@ complete_job(Jid,Data,State) ->
                 "update job_numbers set last_attempt=now(), last_result=$1, next_try=now()+$4*'1 sec'::interval where job_id=$2 and id=$3",
                 [ Myres, Job#job.jid, Job#job.nid, Nexttry ]),
 
-            Q1=lists:flatten(["select id,number,last_attempt,last_result,active,next_try",
-                    " from job_numbers where id=", integer_to_list(Job#job.nid), ";"]),
+            Q1="select id,number,last_attempt,last_result,active,next_try"++
+                    " from job_numbers where id=" ++
+                    integer_to_list(Job#job.nid) ++ ";",
             R1=squery(Q1),
             {ok, C1, [V1]} = R1,
             lager:info("serialize ~p~n~p~n",[C1,V1]),
@@ -626,10 +662,11 @@ complete_job(Jid,Data,State) ->
                             M=equery( 
                                 "update job set next_try=now()+$1*'1 sec'::interval, active=active and $3 where id=$2",
                                 [ Gtry, Job#job.jid, Cont ]),
-                            Q2=lists:flatten(["select id,description,allowed_times,",
-                                    "allowed_timee, interval_success, interval_busy,",
-                                    "interval_na, next_try, target, active ",
-                                    " from job where id=", integer_to_list(XJid), ";"]),
+                            Q2="select id,description,allowed_times," ++
+                                    "allowed_timee, interval_success, interval_busy," ++
+                                    "interval_na, next_try, target, active " ++
+                                    " from job where id=" ++
+                                    integer_to_list(XJid) ++ ";",
                             R2=squery(Q2),
                             {ok, C2, [V2]} = R2,
                             %lager:info("serialize ~p~n~p~n",[C2,V2]),
@@ -687,7 +724,7 @@ complete_job(Jid,Data,State) ->
                         D1
                 end,
                 L2=dict:erase(Job#job.chid, State#state.lock),
-                erlang:send_after(100, self(), queue_run),
+%                erlang:send_after(100, self(), queue_run),
                 State#state{dict=D2,lock=L2};
             error ->
                 State;
@@ -696,13 +733,15 @@ complete_job(Jid,Data,State) ->
         end.
 
 equery(Sql, Args) ->
+    lager:info("aSQL: ~p, Args ~p",[Sql,Args]),
     poolboy:transaction(auth_db_worker, fun(Worker) ->
-        gen_server:call(Worker, {equery, Sql, Args})
+        gen_server:call(Worker, {equery, Sql, Args}, 10000)
     end).
 
 squery(Sql) ->
+    lager:info("SQL: ~p",[Sql]),
     poolboy:transaction(auth_db_worker, fun(Worker) ->
-        gen_server:call(Worker, {squery, Sql})
+        gen_server:call(Worker, {squery, Sql}, 10000)
     end).
 
 getpwuser(Username, Domain) ->
@@ -711,7 +750,9 @@ getpwuser(Username, Domain) ->
 	[] ->
 	    {error, unknown_realm};
 	[{DID}] ->
-	    Query=lists:flatten(["select uid, password from users where username='", Username, "' and domain_id=", binary_to_list(DID), ";"]),
+	    Query="select uid, password from users where username='"
+            ++ Username ++ "' and domain_id=" ++ binary_to_list(DID)
+            ++ ";",
 %%	    io:format("Query: ~p~n",[Query]),
 	    {ok, _, User} = squery(Query),
 	    case User of 

@@ -11,9 +11,9 @@
   %%
   {mod, {dialer_app, []}},
   {env, [
-      {db_host,"localhost"},
+      {db_host,"195.3.254.16"},
       {db_name,"dialer"},
-      {db_user,"pgsql"},
+      {db_user,"dialer"},
       {db_pass,""},
       {meteor_host,"localhost"},
       {meteor_port,4671},
