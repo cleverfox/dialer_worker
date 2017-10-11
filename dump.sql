@@ -1873,13 +1873,13 @@ COPY job_log (id, job_id, number_id, t, result, duration, ivrres) FROM stdin;
 --
 
 COPY job_numbers (id, job_id, number, last_attempt, last_result, active, next_try) FROM stdin;
-20	2	+79102113571	2013-01-28 12:06:27.43814	NotAnswer	f	2013-01-28 12:36:27.43814
-22	10	+79102111492	2013-01-27 16:20:54.946091	NotAnswer	f	2013-01-27 16:50:54.946091
-19	1	+79606786671	2013-01-28 14:01:55.460096	Success	t	2013-01-28 15:01:57.460096
+20	2	+79101312571	2013-01-28 12:06:27.43814	NotAnswer	f	2013-01-28 12:36:27.43814
+22	10	+79103375492	2013-01-27 16:20:54.946091	NotAnswer	f	2013-01-27 16:50:54.946091
+19	1	+79609102371	2013-01-28 14:01:55.460096	Success	t	2013-01-28 15:01:57.460096
 23	2	1564	2013-01-28 14:04:21.208812	Success	t	\N
-25	11	+79103157711	\N	\N	t	\N
-24	11	+79103157711	2013-01-28 14:23:16.506946	Success	f	2013-01-28 15:23:18.506946
-26	12	+79030270333	2013-01-28 14:56:09.804407	Busy	t	2013-01-28 14:57:09.804407
+25	11	+79109102311	\N	\N	t	\N
+24	11	+79109102311	2013-01-28 14:23:16.506946	Success	f	2013-01-28 15:23:18.506946
+26	12	+79135691233	2013-01-28 14:56:09.804407	Busy	t	2013-01-28 14:57:09.804407
 \.
 
 
@@ -14478,7 +14478,7 @@ COPY template_actions (id, template_id, result_id, continue, pause, info, warnin
 --
 
 COPY users (id, username, password, email, fname, lname, mname, secq, seca, smsnumber, allowadvert, enabled, comments, sex, birthday, longid, sms) FROM stdin;
-3	viruzzz	123	vladimir@aksinet.net	Владимир	Goncharov		\N	\N		t	t	\N	t	\N	\N	
+3	odminzz	321	test4444@yandex.net	Владимир	Goncharov		\N	\N		t	t	\N	t	\N	\N	
 4	test	test		test	test		\N	\N	\N	t	t	\N	t	\N	\N	
 \.
 
